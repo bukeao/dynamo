@@ -1357,6 +1357,10 @@ func GenerateGrovePodCliqueSet(
 		gangSet.Spec.Template.TerminationDelay = &operatorConfig.Orchestrators.Grove.TerminationDelay
 	}
 
+	// Inject deployment-level topology constraint (PCS template).
+	// toGroveTopologyConstraint returns nil when input is nil, so this is a no-op without TAS.
+	gangSet.Spec.Template.TopologyConstraint = toGroveTopologyConstraint(dynamoDeployment.Spec.TopologyConstraint)
+
 	// Validate kai-scheduler queue once if kai-scheduler is enabled
 	var validatedQueueName string
 	if runtimeConfig.GroveEnabled && runtimeConfig.KaiSchedulerEnabled {
@@ -1423,6 +1427,13 @@ func GenerateGrovePodCliqueSet(
 					PodSpec:      *podSpec,
 				},
 			}
+
+			// For single-node services, set topology constraint directly on the clique.
+			// For multinode services, the constraint goes on the PCSG instead;
+			// child cliques inherit from PCSG and should NOT have explicit constraints.
+			if !isMultinode {
+				clique.TopologyConstraint = toGroveTopologyConstraint(component.TopologyConstraint)
+			}
 			labels, err := generateLabels(component, dynamoDeployment, serviceName, checkpointInfo)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate labels: %w", err)
@@ -1463,10 +1474,11 @@ func GenerateGrovePodCliqueSet(
 
 		if isMultinode {
 			scalingGroups = append(scalingGroups, grovev1alpha1.PodCliqueScalingGroupConfig{
-				Name:         strings.ToLower(serviceName),
-				CliqueNames:  cliqueNames,
-				Replicas:     component.Replicas,
-				MinAvailable: ptr.To(int32(1)),
+				Name:               strings.ToLower(serviceName),
+				CliqueNames:        cliqueNames,
+				Replicas:           component.Replicas,
+				MinAvailable:       ptr.To(int32(1)),
+				TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint),
 			})
 		}
 	}
