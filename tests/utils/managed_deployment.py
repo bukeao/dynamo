@@ -533,10 +533,11 @@ class ManagedDeployment:
                 pod_name = pod.metadata.name
                 pod_status = pod.status
                 phase = pod_status.phase if pod_status else "Unknown"
+                container_statuses = (
+                    pod_status.container_statuses if pod_status else None
+                ) or []
                 container_lines = []
-                for cs in (
-                    (pod_status.container_statuses or []) if pod_status else []
-                ):
+                for cs in container_statuses:
                     if cs.state and cs.state.waiting:
                         state = f"Waiting: {cs.state.waiting.reason}"
                         if cs.state.waiting.message:
