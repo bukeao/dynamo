@@ -43,7 +43,7 @@ pub mod sequence;
 pub mod subscriber;
 pub mod worker_query;
 
-pub use agent_controller::AgentRouterController;
+pub use agent_controller::AgentController;
 pub use config::{KvRouterConfig, RouterConfigOverride};
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};

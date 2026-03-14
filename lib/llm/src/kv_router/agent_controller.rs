@@ -64,7 +64,7 @@ pub struct SessionCloseAction {
 /// Replaces the separate `cache_control_cell` and `session_control_cell` on KvPushRouter.
 /// Both clients connect to worker endpoints via the event plane and are lazily initialized
 /// on first use.
-pub struct AgentRouterController {
+pub struct AgentController {
     cache_control: OnceCell<EventPlaneClient>,
     session_control: OnceCell<EventPlaneClient>,
     /// session_id -> (worker_id, expiry). Enables router-side affinity resolution
@@ -73,7 +73,7 @@ pub struct AgentRouterController {
     component: Component,
 }
 
-impl AgentRouterController {
+impl AgentController {
     pub fn new(component: Component) -> Self {
         let session_affinity = Arc::new(DashMap::new());
 
@@ -94,9 +94,9 @@ impl AgentRouterController {
             }
         });
 
-        tracing::info!("AgentRouterController initialized (cache_control + session_control, lazy clients)");
+        tracing::info!("AgentController initialized (cache_control + session_control, lazy clients)");
 
-        AgentRouterController {
+        AgentController {
             cache_control: OnceCell::new(),
             session_control: OnceCell::new(),
             session_affinity,

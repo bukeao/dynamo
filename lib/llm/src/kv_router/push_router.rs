@@ -18,7 +18,7 @@ use tracing::Instrument;
 use crate::{
     kv_router::{
         KvRouter,
-        agent_controller::{AgentRouterController, PostRouteActions},
+        agent_controller::{AgentController, PostRouteActions},
         metrics::RouterRequestMetrics,
         protocols::{TokensWithHashes, WorkerWithDpRank},
     },
@@ -34,7 +34,7 @@ pub struct KvPushRouter {
     pub chooser: Arc<KvRouter>,
     /// Unified agent controller for cache_control + session_control.
     /// None when router_enable_cache_control is disabled.
-    agent_controller: Option<Arc<AgentRouterController>>,
+    agent_controller: Option<Arc<AgentController>>,
 }
 
 /// Result of worker selection containing instance ID, dp_rank, and overlap amount.
@@ -144,7 +144,7 @@ impl RequestGuard {
         self.freed = true;
 
         if let Some(ref actions) = self.post_route_actions {
-            AgentRouterController::execute_post_route(actions, &self.context_id);
+            AgentController::execute_post_route(actions, &self.context_id);
         }
     }
 
@@ -195,7 +195,7 @@ impl KvPushRouter {
 
         let agent_controller = if chooser.kv_router_config().router_enable_cache_control {
             let component = chooser.client().endpoint.component().clone();
-            Some(Arc::new(AgentRouterController::new(component)))
+            Some(Arc::new(AgentController::new(component)))
         } else {
             None
         };
