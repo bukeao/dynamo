@@ -68,6 +68,10 @@ pub struct RoutingHints {
     /// Session control for subagent KV isolation. Forwarded from nvext.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_control: Option<crate::protocols::openai::nvext::SessionControl>,
+
+    /// Per-request session parameters for multi-turn streaming sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_params: Option<crate::protocols::openai::nvext::SessionParams>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

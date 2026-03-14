@@ -107,29 +107,16 @@ impl AgentRouterController {
     /// Resolve a session_id to a pinned worker_id from the affinity table.
     /// Returns None if the session is unknown or expired.
     pub fn resolve_session_worker(&self, request: &PreprocessedRequest) -> Option<u64> {
-        let session_params = request
-            .routing
-            .as_ref()
-            .and_then(|r| r.session_control.as_ref())
-            .is_none()
-            .then(|| {
-                // No session_control action -- check extra_args or session_params in nvext
-                request.extra_args.as_ref()
-                    .and_then(|v| v.get("session_params"))
-                    .and_then(|v| v.get("id"))
-                    .and_then(|v| v.as_str())
-            })
-            .flatten();
+        let routing = request.routing.as_ref()?;
 
-        // Also check for session_id in session_control (for close actions, the client
-        // might not set backend_instance_id -- the controller resolves it)
-        let session_id = session_params.or_else(|| {
-            request
-                .routing
-                .as_ref()
-                .and_then(|r| r.session_control.as_ref())
-                .map(|sc| sc.session_id.as_str())
-        })?;
+        // Try session_params.id first (normal multi-turn usage),
+        // fall back to session_control.session_id (for close actions where
+        // the client might not set backend_instance_id)
+        let session_id = routing
+            .session_params
+            .as_ref()
+            .and_then(|sp| sp.id.as_deref())
+            .or_else(|| routing.session_control.as_ref().map(|sc| sc.session_id.as_str()))?;
 
         let entry = self.session_affinity.get(session_id)?;
         if entry.expires_at <= Instant::now() {

@@ -182,13 +182,11 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_control: Option<SessionControl>,
 
-    /// Session parameters for multi-turn streaming sessions.
+    /// Per-request session parameters for multi-turn streaming sessions.
     /// Forwarded to SGLang's async_generate as session_params.
-    /// Fields: id (session ID), rid (request ID from previous turn),
-    /// offset, replace, drop_previous_output.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_params: Option<serde_json::Value>,
+    pub session_params: Option<SessionParams>,
 }
 
 /// Hints from the agent/caller about request characteristics.
@@ -293,6 +291,28 @@ pub struct SessionControl {
 pub enum SessionAction {
     Open,
     Close,
+}
+
+/// Per-request session parameters for multi-turn streaming sessions.
+/// Mirrors SGLang's `SessionParams` dataclass.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct SessionParams {
+    /// Session identifier (must match a previously opened session).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Request ID from the previous turn. Used to resume from the correct
+    /// position in the session's KV cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rid: Option<String>,
+    /// Token offset to resume from within the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<i64>,
+    /// If true, replace the previous output tokens instead of appending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace: Option<bool>,
+    /// If true, drop previous output tokens from the session's KV cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drop_previous_output: Option<bool>,
 }
 
 impl Default for NvExt {

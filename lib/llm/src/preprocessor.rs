@@ -255,12 +255,14 @@ impl OpenAIPreprocessor {
 
         let mut preprocessed = builder.build()?;
 
-        if let Some(sp) = session_params {
-            let extra = preprocessed
-                .extra_args
-                .get_or_insert_with(|| serde_json::json!({}));
-            if let serde_json::Value::Object(map) = extra {
-                map.insert("session_params".to_string(), sp);
+        if let Some(ref sp) = session_params {
+            if let Ok(sp_value) = serde_json::to_value(sp) {
+                let extra = preprocessed
+                    .extra_args
+                    .get_or_insert_with(|| serde_json::json!({}));
+                if let serde_json::Value::Object(map) = extra {
+                    map.insert("session_params".to_string(), sp_value);
+                }
             }
         }
 
@@ -325,6 +327,7 @@ impl OpenAIPreprocessor {
                 cache_control_ttl: nvext.cache_control.as_ref().map(|cc| cc.ttl_seconds()),
                 allowed_worker_ids: None,
                 session_control: nvext.session_control.clone(),
+                session_params: nvext.session_params.clone(),
             };
             builder.routing(Some(routing));
         } else if lora_name.is_some() || cache_control_ttl.is_some() {
