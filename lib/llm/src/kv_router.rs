@@ -30,9 +30,7 @@ pub use dynamo_kv_router::scheduling;
 pub use dynamo_kv_router::selector;
 
 pub mod agent_controller;
-pub mod cache_control;
 pub mod config;
-pub mod session_control;
 mod jetstream;
 pub mod metrics;
 pub mod prefill_router;
@@ -46,9 +44,7 @@ pub mod subscriber;
 pub mod worker_query;
 
 pub use agent_controller::AgentRouterController;
-pub use cache_control::{CacheControlClient, spawn_pin_prefix};
 pub use config::{KvRouterConfig, RouterConfigOverride};
-pub use session_control::{SessionControlClient, spawn_close_session, spawn_open_session};
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 
