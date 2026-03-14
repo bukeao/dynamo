@@ -10,6 +10,7 @@ use crate::preprocessor::media::MediaDecoder;
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
 };
+use dynamo_async_openai::types::ChatCompletionToolChoiceOption;
 use tracing;
 
 use crate::preprocessor::prompt::{PromptInput, TextInput, TokenInput};
@@ -221,13 +222,20 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
 
     fn tools(&self) -> Option<Value> {
         if self.inner.tools.is_none() {
-            None
-        } else {
-            // Try to fix the tool schema if it is missing type and properties
-            Some(may_be_fix_tool_schema(
-                serde_json::to_value(&self.inner.tools).unwrap(),
-            )?)
+            return None;
         }
+        // When tool_choice is "none", strip tools from the template so the model
+        // doesn't see them and generate raw XML tool calls in its response.
+        if matches!(
+            self.inner.tool_choice,
+            Some(ChatCompletionToolChoiceOption::None)
+        ) {
+            return None;
+        }
+        // Try to fix the tool schema if it is missing type and properties
+        Some(may_be_fix_tool_schema(
+            serde_json::to_value(&self.inner.tools).unwrap(),
+        )?)
     }
 
     fn tool_choice(&self) -> Option<Value> {

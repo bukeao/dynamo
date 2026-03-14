@@ -115,7 +115,10 @@ def preprocess_chat_request(
         "add_generation_prompt": True,
         "tokenize": True,
     }
-    if sglang_tools:
+    # Strip tools from template when tool_choice=none so the model doesn't
+    # see them and generate raw XML tool calls in its response.
+    tool_choice = request.get("tool_choice", "auto")
+    if sglang_tools and tool_choice != "none":
         template_kwargs["tools"] = [t.model_dump() for t in sglang_tools]
 
     prompt_token_ids = tokenizer.apply_chat_template(messages, **template_kwargs)
