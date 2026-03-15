@@ -221,9 +221,7 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     }
 
     fn tools(&self) -> Option<Value> {
-        if self.inner.tools.is_none() {
-            return None;
-        }
+        self.inner.tools.as_ref()?;
         // When tool_choice is "none", strip tools from the template so the model
         // doesn't see them and generate raw XML tool calls in its response.
         if matches!(
@@ -232,10 +230,7 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         ) {
             return None;
         }
-        // Try to fix the tool schema if it is missing type and properties
-        Some(may_be_fix_tool_schema(
-            serde_json::to_value(&self.inner.tools).unwrap(),
-        )?)
+        may_be_fix_tool_schema(serde_json::to_value(&self.inner.tools).unwrap())
     }
 
     fn tool_choice(&self) -> Option<Value> {
