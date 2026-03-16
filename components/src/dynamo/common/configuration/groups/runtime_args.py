@@ -142,14 +142,13 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
             choices=get_reasoning_parser_names(),
         )
-        add_argument(
+        add_negatable_bool_argument(
             g,
             flag_name="--exclude-tools-when-tool-choice-none",
             env_var="DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE",
             default=True,
             help="Exclude tool definitions from the chat template when tool_choice='none'. "
-            "Prevents models from generating raw XML tool calls in the content field. "
-            "Set to false to include tools in the template regardless of tool_choice.",
+            "Prevents models from generating raw XML tool calls in the content field.",
         )
         add_argument(
             g,
