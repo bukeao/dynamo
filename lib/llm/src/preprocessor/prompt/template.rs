@@ -74,12 +74,18 @@ impl PromptFormatter {
                         })?;
                     config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));
                 }
+                // Read exclude_tools_when_tool_choice_none from env var
+                // (set by Python runtime via --exclude-tools-when-tool-choice-none flag).
+                // Default: true (strip tools when tool_choice=none).
+                let exclude_tools = std::env::var("DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE")
+                    .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no"))
+                    .unwrap_or(true);
                 Self::from_parts(
                     config,
                     mdc.prompt_context
                         .clone()
                         .map_or(ContextMixins::default(), |x| ContextMixins::new(&x)),
-                    mdc.runtime_config.exclude_tools_when_tool_choice_none,
+                    exclude_tools,
                 )
             }
             PromptFormatterArtifact::HfChatTemplate { .. } => Err(anyhow::anyhow!(
