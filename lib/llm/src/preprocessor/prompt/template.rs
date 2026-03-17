@@ -77,8 +77,9 @@ impl PromptFormatter {
                 // Read exclude_tools_when_tool_choice_none from env var
                 // (set by Python runtime via --exclude-tools-when-tool-choice-none flag).
                 // Default: true (strip tools when tool_choice=none).
+                // Parsing matches Python's semantics: true/1/yes/on → true, everything else → false.
                 let exclude_tools = std::env::var("DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE")
-                    .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no"))
+                    .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes" | "on"))
                     .unwrap_or(true);
                 Self::from_parts(
                     config,

@@ -109,9 +109,13 @@ def _prepare_request(
 
     # Strip tools from the template when tool_choice=none so the model doesn't
     # see them and generate raw XML tool calls in its response.
+    _exclude_tools = os.environ.get(
+        "DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE", "true"
+    ).lower() in ("true", "1", "yes", "on")
     tool_dicts = (
         [tool.model_dump() for tool in request_for_sampling.tools]
-        if request_for_sampling.tools and request_for_sampling.tool_choice != "none"
+        if request_for_sampling.tools
+        and not (_exclude_tools and request_for_sampling.tool_choice == "none")
         else None
     )
     chat_template_kwargs = dict(request_for_sampling.chat_template_kwargs or {})

@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import os
 import socket
 from typing import Any, List, Optional
 
@@ -162,6 +163,10 @@ async def _get_runtime_config(
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
+    # Propagate to env var so the Rust preprocessor can read it at init time
+    os.environ["DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE"] = str(
+        dynamo_args.exclude_tools_when_tool_choice_none
+    ).lower()
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     is_decode_worker = server_args.disaggregation_mode == "decode"
     runtime_config.enable_local_indexer = (
