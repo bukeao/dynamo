@@ -301,3 +301,80 @@ impl MemoryRegion {
         }
     }
 }
+
+/// Backend operations for device memory allocation.
+///
+/// This trait abstracts backend-specific allocation and deallocation operations
+/// for both pinned (host) and device memory. Implementations for CUDA and Ze
+/// backends are provided in their respective modules.
+pub trait StorageBackendOps {
+    /// Allocate pinned host memory
+    ///
+    /// # Safety
+    /// Caller must ensure proper context binding if required by the backend
+    unsafe fn alloc_pinned(&self, size: usize) -> Result<*mut u8, StorageError>;
+
+    /// Free pinned host memory
+    ///
+    /// # Safety
+    /// Caller must ensure ptr was allocated by this backend and size matches
+    unsafe fn free_pinned(&self, ptr: u64, size: usize) -> Result<(), StorageError>;
+
+    /// Allocate device memory, returns (ptr, device_id, metadata)
+    ///
+    /// # Safety
+    /// Caller must ensure proper context binding if required by the backend
+    unsafe fn alloc_device(
+        &self,
+        size: usize,
+    ) -> Result<(u64, u32, DeviceStorageType), StorageError>;
+
+    /// Free device memory
+    ///
+    /// # Safety
+    /// Caller must ensure ptr was allocated by this backend
+    unsafe fn free_device(&self, ptr: u64) -> Result<(), StorageError>;
+
+    /// Get the device ID
+    fn device_id(&self) -> u32;
+}
+
+impl StorageBackendOps for DeviceContext {
+    unsafe fn alloc_pinned(&self, size: usize) -> Result<*mut u8, StorageError> {
+        match self {
+            Self::Cuda(ctx) => StorageBackendOps::alloc_pinned(ctx, size),
+            Self::Ze(ctx) => StorageBackendOps::alloc_pinned(ctx, size),
+        }
+    }
+
+    unsafe fn free_pinned(&self, ptr: u64, size: usize) -> Result<(), StorageError> {
+        match self {
+            Self::Cuda(ctx) => StorageBackendOps::free_pinned(ctx, ptr, size),
+            Self::Ze(ctx) => StorageBackendOps::free_pinned(ctx, ptr, size),
+        }
+    }
+
+    unsafe fn alloc_device(
+        &self,
+        size: usize,
+    ) -> Result<(u64, u32, DeviceStorageType), StorageError> {
+        match self {
+            Self::Cuda(ctx) => StorageBackendOps::alloc_device(ctx, size),
+            Self::Ze(ctx) => StorageBackendOps::alloc_device(ctx, size),
+        }
+    }
+
+    unsafe fn free_device(&self, ptr: u64) -> Result<(), StorageError> {
+        match self {
+            Self::Cuda(ctx) => StorageBackendOps::free_device(ctx, ptr),
+            Self::Ze(ctx) => StorageBackendOps::free_device(ctx, ptr),
+        }
+    }
+
+    fn device_id(&self) -> u32 {
+        match self {
+            Self::Cuda(ctx) => StorageBackendOps::device_id(ctx),
+            Self::Ze(ctx) => StorageBackendOps::device_id(ctx),
+        }
+    }
+}

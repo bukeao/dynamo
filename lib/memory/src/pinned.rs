@@ -8,6 +8,15 @@ use cudarc::driver::CudaContext;
 use std::any::Any;
 use std::sync::Arc;
 
+impl DeviceContextProvider for PinnedStorage {
+    fn device_context(&self) -> Arc<DeviceContext> {
+        match &self.ctx {
+            DeviceContext::Cuda(ctx) => Arc::new(DeviceContext::Cuda(ctx.clone())),
+            DeviceContext::Ze(ctx) => Arc::new(DeviceContext::Ze(ctx.clone())),
+        }
+    }
+}
+
 /// Whether to use write-combined pinned allocations.
 ///
 /// Probed once at first use: returns `false` if `DYN_KVBM_DISABLE_WRITE_COMBINED`
@@ -78,7 +87,7 @@ pub struct PinnedStorage {
     /// Size of the allocation in bytes.
     len: usize,
     /// CUDA context used for allocation and deallocation.
-    ctx: Arc<CudaContext>,
+    ctx: Arc<DeviceContext>,
 }
 
 unsafe impl Send for PinnedStorage {}

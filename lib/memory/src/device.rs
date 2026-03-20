@@ -9,6 +9,78 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+
+#[derive(Clone)]
+pub enum DeviceContext {
+    Cuda(Arc<CudaContext>),
+    Ze(Arc<ZeContext>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceBackend {
+    Cuda,
+    Ze,
+}
+
+/// Trait for types that can provide a device context.
+pub trait DeviceContextProvider {
+    /// Get a reference-counted device context (CUDA or ZE).
+    fn device_context(&self) -> Arc<DeviceContext>;
+}
+
+impl DeviceContextProivder for DeviceStorage {
+    fn device_context(&self) -> &Arc<DeviceContext> {
+        // todo
+    }
+}
+
+/// Allocator for DeviceStorage
+pub struct DeviceAllocator {
+    ctx: Arc<DeviceContext>,
+}
+
+impl Default for DeviceAllocator {
+    fn default() -> Self {
+        Self::new(0, DeviceBackend::Cuda).expect("Failed to create CUDA context")
+    }
+}
+
+
+impl DeviceAllocator {
+    /// Create a new device allocator
+    pub fn new(device_id: usize, backend: DeviceBackend) -> Result<Self, StorageError> {
+        let ctx = match backend {
+            DeviceBackend::Cuda => DeviceContext::Cuda(cuda::Cuda::device_or_create(device_id)?),
+            DeviceBackend::Ze => DeviceContext::Ze(Ze::device_or_create(device_id)?),
+        };
+        Ok(Self { ctx })
+    }
+
+    pub fn ctx(&self) -> Arc<DeviceContext> {
+        match &self.ctx {
+            DeviceContext::Cuda(ctx) => Arc::new(DeviceContext::Cuda(ctx.clone())),
+            DeviceContext::Ze(ctx) => Arc::new(DeviceContext::Ze(ctx.clone())),
+        }
+    }
+}
+
+impl StorageAllocator<DeviceStorage> for DeviceAllocator {
+    fn allocate(&self, size: usize) -> Result<DeviceStorage, StorageError> {
+        DeviceStorage::new(&self.ctx, size)
+    }
+}
+
+/// An enum indicating the type of device storage.
+/// This is needed to ensure ownership of memory is correctly handled.
+/// When building a [`DeviceStorage`] from a torch tensor, we need to ensure that
+/// the torch tensor is not GCed until the [`DeviceStorage`] is dropped.
+/// Because of this, we need to store a reference to the torch tensor in the [`DeviceStorage`]
+#[derive(Debug)]
+enum DeviceStorageType {
+    Owned,                                   // Memory that we allocated ourselves.
+    Torch { _tensor: Arc<dyn TorchTensor> }, // Memory that came from a torch tensor.
+}
+
 /// Get or create a CUDA context for the given device.
 pub(crate) fn cuda_context(device_id: u32) -> Result<Arc<CudaContext>> {
     static CONTEXTS: OnceLock<Mutex<HashMap<u32, Arc<CudaContext>>>> = OnceLock::new();

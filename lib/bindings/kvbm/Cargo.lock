@@ -674,15 +674,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bs58"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4"
-dependencies = [
- "tinyvec",
-]
-
-[[package]]
 name = "bs62"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1638,6 +1629,7 @@ dependencies = [
  "humantime",
  "image",
  "json-five",
+ "level-zero",
  "minijinja",
  "minijinja-contrib",
  "modelexpress-client",
@@ -3376,6 +3368,22 @@ name = "lebe"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
+
+[[package]]
+name = "level-zero"
+version = "0.2.0"
+dependencies = [
+ "level-zero-sys",
+ "libc",
+ "libloading",
+]
+
+[[package]]
+name = "level-zero-sys"
+version = "0.2.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "libc"
