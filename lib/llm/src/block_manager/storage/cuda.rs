@@ -157,107 +157,38 @@ pub struct PinnedStorage {
     handles: RegistrationHandles,
 }
 
-impl Local for PinnedStorage {}
-impl SystemAccessible for PinnedStorage {}
-impl CudaAccessible for PinnedStorage {}
 
-impl PinnedStorage {
-    /// Create a new pinned storage with the given size.
-    ///
-    /// Uses write-combined allocation with NUMA-awareness when enabled.
-    /// Prefer [`new_for_device`](Self::new_for_device) for new code.
-    ///
-    /// TODO(KVBM-336): remove PinnedStorage::new in the future
-    #[deprecated(since = "1.0.0", note = "Use PinnedStorage::new_for_device instead")]
-    pub fn new(ctx: &Arc<CudaContext>, size: usize) -> Result<Self, StorageError> {
-        let inner =
-            dynamo_memory::PinnedStorage::new_for_device(size, Some(ctx.cu_device() as u32))?;
-        Ok(Self {
-            inner,
-            handles: RegistrationHandles::new(),
-        })
-    }
 
-    /// Create a new pinned storage, optionally NUMA-aware for a specific GPU.
-    ///
-    /// Delegates NUMA-aware allocation and write-combined selection to
-    /// [`dynamo_memory::PinnedStorage::new_for_device`].
-    ///
-    /// When `device_id` is `None`, allocates on device 0 without NUMA awareness.
-    pub fn new_for_device(size: usize, device_id: Option<u32>) -> Result<Self, StorageError> {
-        // Warn once if the legacy opt-in env var is still set.
-        static DEPRECATION_WARN: std::sync::Once = std::sync::Once::new();
-        if std::env::var("DYN_KVBM_ENABLE_NUMA").is_ok() {
-            DEPRECATION_WARN.call_once(|| {
-                tracing::warn!(
-                    "DYN_KVBM_ENABLE_NUMA is deprecated for PinnedStorage::new_for_device; \
-                     NUMA is now enabled by default. Use DYN_MEMORY_DISABLE_NUMA=1 to disable."
-                );
-            });
-        }
-        let inner = dynamo_memory::PinnedStorage::new_for_device(size, device_id)?;
-        Ok(Self {
-            inner,
-            handles: RegistrationHandles::new(),
-        })
-    }
-}
+/// CUDA-specific DeviceStorage methods
+impl super::DeviceStorage {
+    /// Create a CUDA device storage from a torch tensor.
+    pub fn new_from_torch_cuda(
+        ctx: &Arc<CudaContext>,
+        tensor: Arc<dyn super::torch::TorchTensor>,
+    ) -> Result<Self, super::StorageError> {
+        use super::torch::{TorchDevice, is_cuda};
 
-impl Drop for PinnedStorage {
-    fn drop(&mut self) {
-        self.handles.release();
-        // inner Drop handles free_host
-    }
-}
-impl super::StorageBackendOps for std::sync::Arc<CudaContext> {
-    unsafe fn alloc_pinned(&self, size: usize) -> Result<*mut u8, super::StorageError> {
-        self.bind_to_thread()
-            .map_err(super::StorageError::Cuda)?;
-
-        // Try NUMA-aware allocation if enabled, otherwise use direct allocation.
-        if crate::block_manager::numa_allocator::is_numa_enabled() {
-            let device_id = self.cu_device() as u32;
-            match crate::block_manager::numa_allocator::worker_pool::NumaWorkerPool::global()
-                .allocate_pinned_for_gpu(size, device_id)
-            {
-                Ok(ptr) => return Ok(ptr),
-                Err(e) => {
-                    tracing::warn!("NUMA allocation failed: {}, using direct allocation", e);
-                }
-            }
+        if !is_cuda(tensor.as_ref()) {
+            return Err(super::StorageError::InvalidConfig("Tensor is not CUDA!".into()));
         }
 
-        malloc_host_prefer_writecombined(size)
-    }
+        let TorchDevice::Cuda(device_id) = tensor.device() else {
+            unreachable!("is_cuda() returned true but device is not CUDA");
+        };
 
-    unsafe fn free_pinned(&self, ptr: u64, _size: usize) -> Result<(), super::StorageError> {
-        cudarc::driver::result::free_host(ptr as _).map_err(super::StorageError::Cuda)
-    }
+        if device_id != ctx.cu_device() as usize {
+            return Err(super::StorageError::InvalidConfig(
+                "Tensor is not on the same device as the context!".into(),
+            ));
+        }
 
-    unsafe fn alloc_device(
-        &self,
-        size: usize,
-    ) -> Result<(u64, u32, super::DeviceStorageType), super::StorageError> {
-        self.bind_to_thread()
-            .map_err(super::StorageError::Cuda)?;
-
-        let ptr = cudarc::driver::result::malloc_sync(size).map_err(super::StorageError::Cuda)?;
-
-        Ok((
-            ptr,
-            self.cu_device() as u32,
-            super::DeviceStorageType::Owned {
-                _ze_device_buffer: None,
-            },
-        ))
-    }
-
-    unsafe fn free_device(&self, ptr: u64) -> Result<(), super::StorageError> {
-        cudarc::driver::result::free_sync(ptr as _).map_err(super::StorageError::Cuda)
-    }
-
-    fn device_id(&self) -> u32 {
-        self.cu_device() as u32
+        Ok(Self {
+            ptr: tensor.data_ptr(),
+            size: tensor.size_bytes(),
+            ctx: super::DeviceContext::Cuda(ctx.clone()),
+            handles: super::RegistrationHandles::new(),
+            storage_type: super::DeviceStorageType::Torch { _tensor: tensor },
+        })
     }
 }
 
@@ -361,7 +292,8 @@ mod tests {
     #[allow(deprecated)]
     #[test]
     fn test_pinned_storage_new_without_numa() {
-        let ctx = Cuda::device_or_create(0).expect("Failed to create CUDA context");
+        let cuda_ctx = Cuda::device_or_create(0).expect("Failed to create CUDA context");
+        let ctx = DeviceContext::Cuda(cuda_ctx);
         let size = 8192;
 
         let mut storage =

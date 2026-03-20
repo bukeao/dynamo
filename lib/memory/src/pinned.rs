@@ -55,7 +55,7 @@ static USE_WRITE_COMBINED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(
 ///
 /// # Safety
 /// Caller must ensure a valid CUDA context is bound to the current thread.
-unsafe fn malloc_host_prefer_writecombined(size: usize) -> Result<*mut u8> {
+pub(super) unsafe fn malloc_host_prefer_writecombined(size: usize) -> Result<*mut u8> {
     if *USE_WRITE_COMBINED {
         // SAFETY: caller guarantees a valid CUDA context is bound to the current thread
         unsafe {
@@ -93,15 +93,25 @@ pub struct PinnedStorage {
 unsafe impl Send for PinnedStorage {}
 unsafe impl Sync for PinnedStorage {}
 
+impl Local for PinnedStorage {}
+impl SystemAccessible for PinnedStorage {}
+impl CudaAccessible for PinnedStorage {}
+
 impl PinnedStorage {
+    /// Internal constructor for creating PinnedStorage from raw parts.
+    /// Used by backend implementations.
+    pub(super) fn from_raw_parts(ptr: usize, len: usize, ctx: Arc<super::DeviceContext>) -> Self {
+        Self { ptr, len, ctx }
+    }
+
     /// Allocate new pinned memory of the given size.
     ///
-    /// This is a convenience method that calls `new_for_device(len, None)`.
+    /// This is a convenience method that calls `new_for_device(len, None, DeviceBackend::Cuda)`.
     ///
     /// # Arguments
     /// * `len` - Size in bytes to allocate
     pub fn new(len: usize) -> Result<Self> {
-        Self::new_for_device(len, None)
+        Self::new_for_device(len, None, super::DeviceBackend::Cuda)
     }
 
     /// Allocate pinned memory, optionally NUMA-aware for a specific GPU.
@@ -123,61 +133,31 @@ impl PinnedStorage {
     /// - `len` is 0
     /// - CUDA context creation fails
     /// - Memory allocation fails
-    pub fn new_for_device(len: usize, device_id: Option<u32>) -> Result<Self> {
+    pub fn new_for_device(len: usize, device_id: Option<u32>, backend: DeviceBackend) -> Result<Self> {
+        use super::{DeviceBackend, DeviceContext, StorageBackendOps};
+
         if len == 0 {
             return Err(StorageError::AllocationFailed(
                 "zero-sized allocations are not supported".into(),
             ));
         }
 
-        let gpu_id = device_id.unwrap_or(0);
-        let ctx = crate::device::cuda_context(gpu_id)?;
+        let device_id = device_id.unwrap_or(0);
 
-        // Try NUMA-aware allocation unless explicitly disabled
-        #[cfg(target_os = "linux")]
-        let numa_ptr = if let Some(gpu_id) = device_id {
-            if !super::numa::is_numa_disabled() {
-                match super::numa::worker_pool::NumaWorkerPool::global()
-                    .allocate_pinned_for_gpu(len, gpu_id)
-                {
-                    Ok(Some(ptr)) => {
-                        tracing::debug!(
-                            "Using NUMA-aware allocation for {} bytes on GPU {}",
-                            len,
-                            gpu_id
-                        );
-                        Some(ptr as usize)
-                    }
-                    Ok(None) => None, // NUMA node unknown, fall through
-                    Err(e) => return Err(StorageError::AllocationFailed(e)),
-                }
-            } else {
-                None
+        // Create context based on backend type
+        let ctx = Arc::new(match backend {
+            DeviceBackend::Cuda => {
+                let cuda_ctx = super::device::cuda_context(device_id)?;
+                DeviceContext::Cuda(cuda_ctx)
             }
-        } else {
-            None
-        };
-
-        #[cfg(not(target_os = "linux"))]
-        let numa_ptr: Option<usize> = None;
-
-        let ptr = if let Some(ptr) = numa_ptr {
-            ptr
-        } else {
-            unsafe {
-                ctx.bind_to_thread().map_err(StorageError::Cuda)?;
-
-                let ptr = malloc_host_prefer_writecombined(len)?;
-
-                assert!(!ptr.is_null(), "Failed to allocate pinned memory");
-                assert!(ptr.is_aligned(), "Pinned memory is not aligned");
-                assert!(len < isize::MAX as usize);
-
-                ptr as usize
+            DeviceBackend::Ze => {
+                let ze_ctx = super::device::ze_context(device_id)?;
+                DeviceContext::Ze(ze_ctx)
             }
-        };
+        });
 
-        Ok(Self { ptr, len, ctx })
+        // Allocate pinned memory using the backend
+        unsafe { ctx.alloc_pinned(len, Some(device_id)) }
     }
 
     /// Get a pointer to the underlying memory.
@@ -197,22 +177,21 @@ impl PinnedStorage {
         self.ptr as *mut u8
     }
 
-    /// Get a reference to the CUDA context used for this allocation.
-    pub fn ctx(&self) -> &Arc<CudaContext> {
+    /// Get a reference to the device context used for this allocation.
+    pub fn device_context(&self) -> &Arc<super::DeviceContext> {
         &self.ctx
     }
 }
 
 impl Drop for PinnedStorage {
     fn drop(&mut self) {
-        if let Err(e) = self.ctx.bind_to_thread() {
-            tracing::debug!("failed to bind CUDA context for free: {e}");
-        }
+        use super::StorageBackendOps;
+
         unsafe {
-            if let Err(e) = cudarc::driver::result::free_host(self.ptr as _) {
+            if let Err(e) = self.ctx.free_pinned(self.ptr as u64, self.len) {
                 tracing::debug!("failed to free pinned memory: {e}");
             }
-        };
+        }
     }
 }
 

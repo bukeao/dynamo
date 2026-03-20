@@ -16,9 +16,7 @@ use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "block-manager")]
 use level_zero::ZE_EVENT_SCOPE_FLAG_HOST;
-#[cfg(feature = "block-manager")]
 use crate::block_manager::storage::ze::ZeCommandQueue;
 
 // ============================================================================

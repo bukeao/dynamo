@@ -469,10 +469,56 @@ impl StorageAllocator<SystemStorage> for SystemAllocator {
 }
 
 
+/// Backend operations for device memory allocation.
+///
+/// This trait abstracts backend-specific allocation and deallocation operations
+/// for both pinned (host) and device memory. Implementations for CUDA and Ze
+/// backends are provided in their respective modules.
+pub trait StorageBackendOps {
+    /// Allocate pinned host memory
+    ///
+    /// # Safety
+    /// Caller must ensure proper context binding if required by the backend
+    unsafe fn alloc_pinned(&self, size: usize) -> Result<*mut u8, StorageError>;
+
+    /// Free pinned host memory
+    ///
+    /// # Safety
+    /// Caller must ensure ptr was allocated by this backend and size matches
+    unsafe fn free_pinned(&self, ptr: u64, size: usize) -> Result<(), StorageError>;
+
+    /// Allocate device memory, returns (ptr, device_id, metadata)
+    ///
+    /// # Safety
+    /// Caller must ensure proper context binding if required by the backend
+    unsafe fn alloc_device(
+        &self,
+        size: usize,
+    ) -> Result<(u64, u32, DeviceStorageType), StorageError>;
+
+    /// Free device memory
+    ///
+    /// # Safety
+    /// Caller must ensure ptr was allocated by this backend
+    unsafe fn free_device(&self, ptr: u64) -> Result<(), StorageError>;
+
+    /// Get the device ID
+    fn device_id(&self) -> u32;
+}
 
 
 
 
+
+
+
+/// Pinned host memory storage using CUDA page-locked memory.
+/// Wraps [`dynamo_memory::PinnedStorage`] and adds registration handle support.
+#[derive(Debug)]
+pub struct PinnedStorage {
+    inner: dynamo_memory::PinnedStorage,
+    handles: RegistrationHandles,
+}
 
 impl PinnedStorage {
     /// Create a new pinned storage with the given size.
@@ -482,9 +528,13 @@ impl PinnedStorage {
     ///
     /// TODO(KVBM-336): remove PinnedStorage::new in the future
     #[deprecated(since = "1.0.0", note = "Use PinnedStorage::new_for_device instead")]
-    pub fn new(ctx: &Arc<CudaContext>, size: usize) -> Result<Self, StorageError> {
-        let inner =
-            dynamo_memory::PinnedStorage::new_for_device(size, Some(ctx.cu_device() as u32))?;
+    pub fn new(ctx: &DeviceContext, size: usize) -> Result<Self, StorageError> {
+        let (device_id, backend) = match ctx {
+            DeviceContext::Cuda(cuda_ctx) => (cuda_ctx.cu_device() as u32, dynamo_memory::DeviceBackend::Cuda),
+            DeviceContext::Ze(ze_ctx) => (ze_ctx.device_id as u32, dynamo_memory::DeviceBackend::Ze),
+        };
+
+        let inner = dynamo_memory::PinnedStorage::new_for_device(size, Some(device_id), backend)?;
         Ok(Self {
             inner,
             handles: RegistrationHandles::new(),
@@ -497,7 +547,7 @@ impl PinnedStorage {
     /// [`dynamo_memory::PinnedStorage::new_for_device`].
     ///
     /// When `device_id` is `None`, allocates on device 0 without NUMA awareness.
-    pub fn new_for_device(size: usize, device_id: Option<u32>) -> Result<Self, StorageError> {
+    pub fn new_for_device(size: usize, device_id: Option<u32>, backend: dynamo_memory::DeviceBackend) -> Result<Self, StorageError> {
         // Warn once if the legacy opt-in env var is still set.
         static DEPRECATION_WARN: std::sync::Once = std::sync::Once::new();
         if std::env::var("DYN_KVBM_ENABLE_NUMA").is_ok() {
@@ -508,7 +558,14 @@ impl PinnedStorage {
                 );
             });
         }
-        let inner = dynamo_memory::PinnedStorage::new_for_device(size, device_id)?;
+        let inner = match backend {
+            dynamo_memory::DeviceBackend::Cuda => {
+                dynamo_memory::PinnedStorage::new_for_device(size, device_id, dynamo_memory::DeviceBackend::Cuda)?
+            }
+            dynamo_memory::DeviceBackend::Ze => {
+                dynamo_memory::PinnedStorage::new_for_device(size, device_id, dynamo_memory::DeviceBackend::Ze)?
+            }
+        };
         Ok(Self {
             inner,
             handles: RegistrationHandles::new(),

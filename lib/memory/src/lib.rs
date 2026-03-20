@@ -38,7 +38,7 @@ mod tensor;
 mod tests;
 
 pub use arena::{ArenaAllocator, ArenaBuffer, ArenaError};
-pub use device::DeviceStorage;
+pub use device::{DeviceAllocator, DeviceBackend, DeviceContext, DeviceContextProvider, DeviceStorage};
 #[cfg(target_os = "linux")]
 pub use disk::DiskStorage;
 pub use external::ExternalDeviceMemory;
@@ -312,7 +312,7 @@ pub trait StorageBackendOps {
     ///
     /// # Safety
     /// Caller must ensure proper context binding if required by the backend
-    unsafe fn alloc_pinned(&self, size: usize) -> Result<*mut u8, StorageError>;
+    unsafe fn alloc_pinned(&self, size: usize, device_id: Option<u32>) -> Result<PinnedStorage, StorageError>;
 
     /// Free pinned host memory
     ///
@@ -340,10 +340,10 @@ pub trait StorageBackendOps {
 }
 
 impl StorageBackendOps for DeviceContext {
-    unsafe fn alloc_pinned(&self, size: usize) -> Result<*mut u8, StorageError> {
+    unsafe fn alloc_pinned(&self, size: usize, device_id: Option<u32>) -> Result<PinnedStorage, StorageError> {
         match self {
-            Self::Cuda(ctx) => StorageBackendOps::alloc_pinned(ctx, size),
-            Self::Ze(ctx) => StorageBackendOps::alloc_pinned(ctx, size),
+            Self::Cuda(ctx) => StorageBackendOps::alloc_pinned(ctx, size, device_id),
+            Self::Ze(ctx) => StorageBackendOps::alloc_pinned(ctx, size, device_id),
         }
     }
 

@@ -19,7 +19,7 @@ use crate::block_manager::{
     offload::{MAX_CONCURRENT_TRANSFERS, MAX_TRANSFER_BATCH_SIZE},
     storage::{
         DeviceAllocator, DeviceBackend, DeviceStorage, DiskAllocator, PinnedAllocator,
-        Cuda, Ze, is_ze_available,
+        Cuda, Ze,
         torch::{TorchTensor, is_cuda_tensors, is_ze_tensors},
     },
 };
@@ -140,39 +140,22 @@ async fn perform_allocation_and_build_handler(
         num_layers: device_layout.config().num_layers,
     };
 
-    // Detect device backend: try both CUDA and Ze
-    #[cfg feature=cuda]
-    let cuda_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        Cuda::device_or_create(device_id)
-    }));
-
-    // Only try Ze if the loader library exists (prevents segfaults)
-    #[cfg feature = Ze]
-    let ze_result = if is_ze_available() {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Ze::device_or_create(device_id)
-        }))
-    } else {
-        tracing::debug!("Level Zero loader not found, skipping Ze backend");
-        Err(Box::new("Ze loader not available") as Box<dyn std::any::Any + Send>)
-    };
-
-    // Select backend based on availability
-    let (backend, stream) = if let Ok(Ok(cuda_ctx)) = cuda_result {
+    // Detect device backend based on compile-time features
+    // Default to CUDA, use Ze if ze feature is enabled
+    #[cfg(not(feature = "ze"))]
+    let (backend, stream) = {
         tracing::info!("Using CUDA backend for device {}", device_id);
+        let cuda_ctx = Cuda::device_or_create(device_id)?;
         let stream = cuda_ctx.new_stream()?;
         (DeviceBackend::Cuda, DeviceStream::Cuda(stream))
-    } else if let Ok(Ok(ze_ctx)) = ze_result {
+    };
+
+    #[cfg(feature = "ze")]
+    let (backend, stream) = {
         tracing::info!("Using Ze backend for device {}", device_id);
+        let ze_ctx = Ze::device_or_create(device_id)?;
         let queue = ze_ctx.new_commandqueue().map_err(|e| anyhow::anyhow!("Failed to create Ze command queue: {:?}", e))?;
         (DeviceBackend::Ze, DeviceStream::Ze(queue))
-    } else {
-        panic!(
-            "No device backend available for device {}. \
-             Both CUDA and Ze initialization failed. \
-             Please ensure either CUDA or Intel XPU/Level Zero is properly installed.",
-            device_id
-        );
     };
 
     let transfer_context = Arc::new(
@@ -203,7 +186,7 @@ async fn perform_allocation_and_build_handler(
     )?);
     // host
     let host_blocks = if leader_meta.num_host_blocks > 0 {
-        let host_allocator = Arc::new(PinnedAllocator::new(device_id)?);
+        let host_allocator = Arc::new(PinnedAllocator::new(device_id, backend)?);
 
         let host_layout = layout_builder
             .num_blocks(leader_meta.num_host_blocks)
