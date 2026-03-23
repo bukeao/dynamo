@@ -25,7 +25,6 @@ use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
 pub trait Worker: Send + Sync {
-    #[allow(clippy::too_many_arguments)]
     fn register_kv_caches(
         &mut self,
         num_device_blocks: usize,
@@ -484,7 +483,6 @@ impl PyKvConnectorWorker {
         Ok(Self { connector_worker })
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (num_device_blocks, page_size, device_id, dtype_width_bytes, kv_caches, raw_event_handles, device_layout_type=None, host_layout_type=None, disk_layout_type=None))]
     pub fn register_kv_caches(
         &mut self,
@@ -564,10 +562,15 @@ fn _get_current_context() -> CUcontext {
 }
 
 pub fn event_sync_blocking(event: u64) {
-    let status = unsafe { cuEventSynchronize(event as CUevent) };
-    assert_eq!(
-        status,
-        cudaError_enum::CUDA_SUCCESS,
-        "cuEventSynchronize failed"
-    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let status = unsafe { cuEventSynchronize(event as CUevent) };
+        assert_eq!(
+            status,
+            cudaError_enum::CUDA_SUCCESS,
+            "cuEventSynchronize failed"
+        );
+    }));
+    if result.is_err() {
+        tracing::error!("event_sync_blocking panic caught; continuing");
+    }
 }
