@@ -28,6 +28,7 @@ media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
 [dependencies]
 dynamo-runtime = { path = "../../runtime" }
 dynamo-parsers = { path = "../../parsers" }
+level-zero = { path = "../../../../level-zero-rc/level-zero" }
 
 anyhow = { version = "1" }
 async-trait = { version = "0.1" }

@@ -21,9 +21,10 @@ testing-full = ["testing-cuda", "testing-nixl"]
 testing-cuda = ["dep:cudarc", "dynamo-memory/testing-cuda"]
 testing-nixl = ["dep:nixl-sys", "dynamo-memory/testing-nixl"]
 testing-etcd = []
-block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec"]
+block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec", "dep:level-zero"]
 block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicatif"]
 cuda = ["dep:cudarc"]
+ze = ["dep:level-zero"]
 integration = ["dynamo-runtime/integration"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile"]
 bench = ["dynamo-kv-router/bench"]
@@ -50,6 +51,7 @@ dynamo-tokens = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["metrics"] }
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true }
+level-zero = { path = "../../../level-zero-rc/level-zero", optional = true }
 
 # workspace
 aho-corasick = "1.1"
