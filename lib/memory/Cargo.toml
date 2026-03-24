@@ -27,6 +27,7 @@ dynamo-config = { workspace = true }
 
 anyhow = { workspace = true }
 cudarc = { workspace = true }
+level-zero = { path = "/tmp/level-zero-rc/level-zero" }
 nixl-sys = { version = "=0.10.1" }
 serde = { workspace = true}
 thiserror = { workspace = true }

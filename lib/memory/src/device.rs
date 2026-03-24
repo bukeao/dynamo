@@ -29,12 +29,21 @@ pub enum DeviceContext {
     Ze(Arc<ZeContext>),
 }
 
+impl DeviceContext {
+    /// Get the backend type of this context
+    pub fn backend(&self) -> DeviceBackend {
+        match self {
+            Self::Cuda(_) => DeviceBackend::Cuda,
+            Self::Ze(_) => DeviceBackend::Ze,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceBackend {
     Cuda,
     Ze,
 }
-
 
 /// Trait for types that can provide a device context.
 pub trait DeviceContextProvider {
@@ -57,18 +66,15 @@ impl Default for DeviceAllocator {
 impl DeviceAllocator {
     /// Create a new device allocator
     pub fn new(device_id: usize, backend: DeviceBackend) -> Result<Self, StorageError> {
-        let ctx = match backend {
-            DeviceBackend::Cuda => DeviceContext::Cuda(cuda::Cuda::device_or_create(device_id)?),
-            DeviceBackend::Ze => DeviceContext::Ze(Ze::device_or_create(device_id)?),
-        };
+        let ctx = Arc::new(match backend {
+            DeviceBackend::Cuda => DeviceContext::Cuda(cuda_context(device_id as u32)?),
+            DeviceBackend::Ze => DeviceContext::Ze(ze_context(device_id as u32)?),
+        });
         Ok(Self { ctx })
     }
 
     pub fn ctx(&self) -> Arc<DeviceContext> {
-        match &self.ctx {
-            DeviceContext::Cuda(ctx) => Arc::new(DeviceContext::Cuda(ctx.clone())),
-            DeviceContext::Ze(ctx) => Arc::new(DeviceContext::Ze(ctx.clone())),
-        }
+        self.ctx.clone()
     }
 }
 
