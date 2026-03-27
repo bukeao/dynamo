@@ -11,7 +11,7 @@
 //! - Lazy initialization of device contexts
 //! - Automatic cleanup of resources
 
-use super::StorageError;
+use super::{StorageError, StorageBackendOps};
 
 use std::{
     collections::HashMap,
@@ -19,6 +19,11 @@ use std::{
 };
 
 use cudarc::driver::{CudaContext, sys};
+
+/// Create a CUDA backend for the specified device
+pub fn create_backend(device_id: usize) -> Result<Arc<dyn StorageBackendOps>, StorageError> {
+    Ok(Cuda::device_or_create(device_id)?)
+}
 
 /// Allocates pinned host memory, preferring write-combined if supported.
 ///
@@ -121,7 +126,11 @@ impl Cuda {
     }
 }
 
-impl super::StorageBackendOps for std::sync::Arc<CudaContext> {
+impl super::StorageBackendOps for CudaContext {
+    fn backend_type(&self) -> super::DeviceBackend {
+        super::DeviceBackend::Cuda
+    }
+
     unsafe fn alloc_pinned(&self, size: usize) -> Result<*mut u8, super::StorageError> {
         self.bind_to_thread()
             .map_err(super::StorageError::Cuda)?;
@@ -171,15 +180,11 @@ impl super::StorageBackendOps for std::sync::Arc<CudaContext> {
     fn device_id(&self) -> u32 {
         self.cu_device() as u32
     }
-}
 
-/// CUDA-specific DeviceStorage methods
-impl super::DeviceStorage {
-    /// Create a CUDA device storage from a torch tensor.
-    pub fn new_from_torch_cuda(
-        ctx: &Arc<CudaContext>,
+    fn new_from_torch(
+        self: Arc<Self>,
         tensor: Arc<dyn super::torch::TorchTensor>,
-    ) -> Result<Self, super::StorageError> {
+    ) -> Result<super::DeviceStorage, super::StorageError> {
         use super::torch::{TorchDevice, is_cuda};
 
         if !is_cuda(tensor.as_ref()) {
@@ -190,16 +195,16 @@ impl super::DeviceStorage {
             unreachable!("is_cuda() returned true but device is not CUDA");
         };
 
-        if device_id != ctx.cu_device() as usize {
+        if device_id != self.cu_device() as usize {
             return Err(super::StorageError::InvalidConfig(
                 "Tensor is not on the same device as the context!".into(),
             ));
         }
 
-        Ok(Self {
+        Ok(super::DeviceStorage {
             ptr: tensor.data_ptr(),
             size: tensor.size_bytes(),
-            ctx: super::DeviceContext::Cuda(ctx.clone()),
+            ctx: super::DeviceContext::new(self as Arc<dyn super::StorageBackendOps>),
             handles: super::RegistrationHandles::new(),
             storage_type: super::DeviceStorageType::Torch { _tensor: tensor },
         })

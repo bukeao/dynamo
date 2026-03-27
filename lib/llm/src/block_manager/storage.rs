@@ -82,11 +82,7 @@ use torch::*;
 /// Check if Level Zero is available on this system (without loading the library)
 /// Returns true only if the loader library file exists
 pub fn is_ze_available() -> bool {
-    std::fs::metadata("/usr/lib/x86_64-linux-gnu/libze_loader.so.1")
-        .or_else(|_| std::fs::metadata("/usr/lib/x86_64-linux-gnu/libze_loader.so"))
-        .or_else(|_| std::fs::metadata("/usr/local/lib/libze_loader.so.1"))
-        .or_else(|_| std::fs::metadata("/usr/local/lib/libze_loader.so"))
-        .is_ok()
+    ze::Ze::is_available()
 }
 
 use std::{
@@ -97,11 +93,8 @@ use std::{
     sync::Arc,
 };
 
-use cudarc::driver::CudaContext;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-
-use self::ze::ZeContext;
 
 /// Result type for storage operations
 pub type StorageResult<T> = std::result::Result<T, StorageError>;
@@ -461,7 +454,10 @@ impl StorageAllocator<SystemStorage> for SystemAllocator {
 /// This trait abstracts backend-specific allocation and deallocation operations
 /// for both pinned (host) and device memory. Implementations for CUDA and Ze
 /// backends are provided in their respective modules.
-pub trait StorageBackendOps {
+pub trait StorageBackendOps: Send + Sync + std::any::Any {
+    /// Get the backend type
+    fn backend_type(&self) -> DeviceBackend;
+
     /// Allocate pinned host memory
     ///
     /// # Safety
@@ -491,6 +487,12 @@ pub trait StorageBackendOps {
 
     /// Get the device ID
     fn device_id(&self) -> u32;
+
+    /// Create a DeviceStorage from a torch tensor
+    fn new_from_torch(
+        self: Arc<Self>,
+        tensor: Arc<dyn torch::TorchTensor>,
+    ) -> Result<DeviceStorage, StorageError>;
 }
 
 
@@ -501,10 +503,27 @@ pub enum DeviceBackend {
     Ze,
 }
 
+impl DeviceBackend {
+    /// Create a backend instance for the specified device
+    pub fn create(self, device_id: usize) -> Result<Arc<dyn StorageBackendOps>, StorageError> {
+        match self {
+            DeviceBackend::Cuda => cuda::create_backend(device_id),
+            DeviceBackend::Ze => ze::create_backend(device_id),
+        }
+    }
+}
+
+/// Device context that uses vtable dispatch for backend operations
 #[derive(Clone)]
-pub enum DeviceContext {
-    Cuda(Arc<CudaContext>),
-    Ze(Arc<ZeContext>),
+pub struct DeviceContext {
+    backend: Arc<dyn StorageBackendOps>,
+}
+
+impl DeviceContext {
+    /// Create a new DeviceContext from a CUDA context
+    pub fn new(backend: Arc<dyn StorageBackendOps>) -> Self {
+        Self { backend }
+    }
 }
 
 /// Trait for types that can provide a device context.
@@ -582,10 +601,7 @@ impl Storage for PinnedStorage {
 
 impl DeviceContextProvider for PinnedStorage {
     fn device_context(&self) -> Arc<DeviceContext> {
-        match &self.ctx {
-            DeviceContext::Cuda(ctx) => Arc::new(DeviceContext::Cuda(ctx.clone())),
-            DeviceContext::Ze(ctx) => Arc::new(DeviceContext::Ze(ctx.clone())),
-        }
+        Arc::new(self.ctx.clone())
     }
 }
 
@@ -636,21 +652,13 @@ impl Default for PinnedAllocator {
 impl PinnedAllocator {
     /// Create a new pinned allocator
     pub fn new(device_id: usize, backend: DeviceBackend) -> Result<Self, StorageError> {
-        match backend {
-            DeviceBackend::Cuda => Ok(Self {
-                ctx: DeviceContext::Cuda(cuda::Cuda::device_or_create(device_id)?),
-            }),
-            DeviceBackend::Ze => Ok(Self {
-                ctx: DeviceContext::Ze(Ze::device_or_create(device_id)?),
-            }),
-        }
+        Ok(Self {
+            ctx: DeviceContext::new(backend.create(device_id)?),
+        })
     }
 
     pub fn backend(&self) -> DeviceBackend {
-        match &self.ctx {
-            DeviceContext::Cuda(_) => DeviceBackend::Cuda,
-            DeviceContext::Ze(_) => DeviceBackend::Ze,
-        }
+        self.ctx.backend_type()
     }
 
     pub fn ctx(&self) -> &DeviceContext {
@@ -667,50 +675,46 @@ impl StorageAllocator<PinnedStorage> for PinnedAllocator {
 
 impl std::fmt::Debug for DeviceContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Cuda(_) => write!(f, "DeviceContext::Cuda"),
-            Self::Ze(_) => write!(f, "DeviceContext::Ze"),
+        match self.backend.backend_type() {
+            DeviceBackend::Cuda => write!(f, "DeviceContext::Cuda"),
+            DeviceBackend::Ze => write!(f, "DeviceContext::Ze"),
         }
     }
 }
 
 impl StorageBackendOps for DeviceContext {
+    fn backend_type(&self) -> DeviceBackend {
+        self.backend.backend_type()
+    }
+
     unsafe fn alloc_pinned(&self, size: usize) -> Result<*mut u8, StorageError> {
-        match self {
-            Self::Cuda(ctx) => StorageBackendOps::alloc_pinned(ctx, size),
-            Self::Ze(ctx) => StorageBackendOps::alloc_pinned(ctx, size),
-        }
+        unsafe { self.backend.alloc_pinned(size) }
     }
 
     unsafe fn free_pinned(&self, ptr: u64, size: usize) -> Result<(), StorageError> {
-        match self {
-            Self::Cuda(ctx) => StorageBackendOps::free_pinned(ctx, ptr, size),
-            Self::Ze(ctx) => StorageBackendOps::free_pinned(ctx, ptr, size),
-        }
+        unsafe { self.backend.free_pinned(ptr, size) }
     }
 
     unsafe fn alloc_device(
         &self,
         size: usize,
     ) -> Result<(u64, u32, DeviceStorageType), StorageError> {
-        match self {
-            Self::Cuda(ctx) => StorageBackendOps::alloc_device(ctx, size),
-            Self::Ze(ctx) => StorageBackendOps::alloc_device(ctx, size),
-        }
+        unsafe { self.backend.alloc_device(size) }
     }
 
     unsafe fn free_device(&self, ptr: u64) -> Result<(), StorageError> {
-        match self {
-            Self::Cuda(ctx) => StorageBackendOps::free_device(ctx, ptr),
-            Self::Ze(ctx) => StorageBackendOps::free_device(ctx, ptr),
-        }
+        unsafe { self.backend.free_device(ptr) }
     }
 
     fn device_id(&self) -> u32 {
-        match self {
-            Self::Cuda(ctx) => StorageBackendOps::device_id(ctx),
-            Self::Ze(ctx) => StorageBackendOps::device_id(ctx),
-        }
+        self.backend.device_id()
+    }
+
+    fn new_from_torch(
+        self: Arc<Self>,
+        tensor: Arc<dyn torch::TorchTensor>,
+    ) -> Result<DeviceStorage, StorageError> {
+        self.backend.clone().new_from_torch(tensor)
     }
 }
 
@@ -754,29 +758,20 @@ impl DeviceStorage {
         })
     }
 
-    /// Create a device storage from a torch tensor by dispatching on context backend.
+    /// Create a device storage from a torch tensor.
     pub fn new_from_torch(
         ctx: &DeviceContext,
         tensor: Arc<dyn TorchTensor>,
     ) -> Result<Self, StorageError> {
-        match ctx {
-            DeviceContext::Cuda(ctx) => Self::new_from_torch_cuda(ctx, tensor),
-            DeviceContext::Ze(ctx) => Self::new_from_torch_ze(ctx, tensor),
-        }
+        ctx.backend.clone().new_from_torch(tensor)
     }
 
     pub fn backend(&self) -> DeviceBackend {
-        match &self.ctx {
-            DeviceContext::Cuda(_) => DeviceBackend::Cuda,
-            DeviceContext::Ze(_) => DeviceBackend::Ze,
-        }
+        self.ctx.backend_type()
     }
 
     pub fn context(&self) -> Arc<DeviceContext> {
-        match &self.ctx {
-            DeviceContext::Cuda(ctx) => Arc::new(DeviceContext::Cuda(ctx.clone())),
-            DeviceContext::Ze(ctx) => Arc::new(DeviceContext::Ze(ctx.clone())),
-        }
+        Arc::new(self.ctx.clone())
     }
     pub fn device_storage_type(&self) -> &DeviceStorageType {
         &self.storage_type
@@ -858,18 +853,13 @@ impl Default for DeviceAllocator {
 impl DeviceAllocator {
     /// Create a new device allocator
     pub fn new(device_id: usize, backend: DeviceBackend) -> Result<Self, StorageError> {
-        let ctx = match backend {
-            DeviceBackend::Cuda => DeviceContext::Cuda(cuda::Cuda::device_or_create(device_id)?),
-            DeviceBackend::Ze => DeviceContext::Ze(Ze::device_or_create(device_id)?),
-        };
-        Ok(Self { ctx })
+        Ok(Self {
+            ctx: DeviceContext::new(backend.create(device_id)?),
+        })
     }
 
     pub fn ctx(&self) -> Arc<DeviceContext> {
-        match &self.ctx {
-            DeviceContext::Cuda(ctx) => Arc::new(DeviceContext::Cuda(ctx.clone())),
-            DeviceContext::Ze(ctx) => Arc::new(DeviceContext::Ze(ctx.clone())),
-        }
+        Arc::new(self.ctx.clone())
     }
 }
 
@@ -1016,7 +1006,8 @@ mod cuda_tests {
         let ctx = cuda::Cuda::device_or_create(0).expect("Failed to create CUDA context");
         let allocator = DeviceAllocator::new(0, DeviceBackend::Cuda).expect("Failed to create CUDA allocator");
         let size_bytes = 1024;
-        let device_ctx = DeviceContext::Cuda(ctx.clone());
+        let backend: Arc<dyn StorageBackendOps> = ctx.clone();
+        let device_ctx = DeviceContext::new(backend);
 
         let actual_storage =
             std::mem::ManuallyDrop::new(DeviceStorage::new(&device_ctx, size_bytes).unwrap());
@@ -1036,7 +1027,8 @@ mod cuda_tests {
         let ctx = cuda::Cuda::device_or_create(0).expect("Failed to create CUDA context");
         let allocator = DeviceAllocator::new(0, DeviceBackend::Cuda).expect("Failed to create CUDA allocator");
         let size_bytes = 1024;
-        let device_ctx = DeviceContext::Cuda(ctx.clone());
+        let backend: Arc<dyn StorageBackendOps> = ctx.clone();
+        let device_ctx = DeviceContext::new(backend);
 
         let actual_storage = DeviceStorage::new(&device_ctx, size_bytes).unwrap();
 
@@ -1061,7 +1053,8 @@ mod cuda_tests {
         let ctx = cuda::Cuda::device_or_create(0).expect("Failed to create CUDA context");
         let allocator = DeviceAllocator::new(0, DeviceBackend::Cuda).expect("Failed to create CUDA allocator");
         let size_bytes = 1024;
-        let device_ctx = DeviceContext::Cuda(ctx.clone());
+        let backend: Arc<dyn StorageBackendOps> = ctx.clone();
+        let device_ctx = DeviceContext::new(backend);
 
         let actual_storage = DeviceStorage::new(&device_ctx, size_bytes).unwrap();
 

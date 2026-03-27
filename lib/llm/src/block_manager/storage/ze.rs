@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::StorageError;
+use super::{StorageError, StorageBackendOps};
 use crate::block_manager::block::transfer::DeviceStream;
 
 use level_zero::{self, CommandList, CommandQueue, Context, Device, Driver, EventPool};
@@ -10,6 +10,11 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex, OnceLock},
 };
+
+/// Create a Ze backend for the specified device
+pub fn create_backend(device_id: usize) -> Result<Arc<dyn StorageBackendOps>, StorageError> {
+    Ok(Ze::device_or_create(device_id)?)
+}
 
 #[derive(Debug)]
 pub enum ZeError {
@@ -232,7 +237,11 @@ impl Ze {
     }
 }
 
-impl super::StorageBackendOps for std::sync::Arc<ZeContext> {
+impl super::StorageBackendOps for ZeContext {
+    fn backend_type(&self) -> super::DeviceBackend {
+        super::DeviceBackend::Ze
+    }
+
     unsafe fn alloc_pinned(&self, size: usize) -> Result<*mut u8, super::StorageError> {
         unsafe { malloc_host_prefer_writecombined_ze(size) }
     }
@@ -273,15 +282,11 @@ impl super::StorageBackendOps for std::sync::Arc<ZeContext> {
     fn device_id(&self) -> u32 {
         self.device_id as u32
     }
-}
 
-/// ZE-specific DeviceStorage methods
-impl super::DeviceStorage {
-    /// Create a ZE device storage from a torch tensor.
-    pub fn new_from_torch_ze(
-        ctx: &Arc<ZeContext>,
+    fn new_from_torch(
+        self: Arc<Self>,
         tensor: Arc<dyn super::torch::TorchTensor>,
-    ) -> Result<Self, super::StorageError> {
+    ) -> Result<super::DeviceStorage, super::StorageError> {
         use super::torch::is_ze;
 
         if !is_ze(tensor.as_ref()) {
@@ -290,10 +295,10 @@ impl super::DeviceStorage {
             ));
         }
 
-        Ok(Self {
+        Ok(super::DeviceStorage {
             ptr: tensor.data_ptr(),
             size: tensor.size_bytes(),
-            ctx: super::DeviceContext::Ze(ctx.clone()),
+            ctx: super::DeviceContext::new(self as Arc<dyn super::StorageBackendOps>),
             handles: super::RegistrationHandles::new(),
             storage_type: super::DeviceStorageType::Torch { _tensor: tensor },
         })
