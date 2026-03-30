@@ -22,7 +22,8 @@ use tokio::sync::oneshot;
 
 pub use crate::block_manager::storage::{CudaAccessible, Local, Remote};
 pub use async_trait::async_trait;
-pub use context::{DeviceStream, PoolConfig, TransferContext};
+pub use context::{DeviceMemPool, DeviceStream, PoolConfig, TransferContext};
+use context::{PinnedBuffer, SyncPinnedBufferPool, TransferBackend};
 
 /// A block that can be the target of a write
 pub trait Writable {}

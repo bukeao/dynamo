@@ -3,10 +3,17 @@
 
 use super::*;
 
+use super::context::{DeviceMemPool, PinnedBuffer, PoolConfig, TransferBackend};
 use crate::block_manager::block::{BlockDataProvider, BlockDataProviderMut};
 use crate::block_manager::storage::ze::ZeCommandQueue;
+use dynamo_runtime::utils::pool::SyncPoolItem;
+use level_zero::ZE_EVENT_SCOPE_FLAG_HOST;
 use std::ffi::c_void;
 use std::ops::Range;
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 type ZeMemcpyFnPtr =
     fn(src_ptr: *const u8, dst_ptr: *mut u8, size: usize, queue: &ZeCommandQueue)
@@ -275,4 +282,134 @@ fn ze_memcpy_h2d(
         TransferError::ExecutionError(format!("ZE H2D queue submit failed: {:?}", e))
     })?;
     Ok(())
+}
+
+// ============================================================================
+// TransferBackendZe
+// ============================================================================
+
+pub(super) struct TransferBackendZe {
+    queue: Arc<ZeCommandQueue>,
+    ze_mem_pool: Option<Arc<ZeMemPool>>,
+    ze_event_tx: mpsc::UnboundedSender<(
+        Arc<level_zero::EventPool>,
+        level_zero::Event,
+        oneshot::Sender<()>,
+    )>,
+    ze_event_worker: Option<JoinHandle<()>>,
+    cancel_token: CancellationToken,
+}
+
+impl TransferBackendZe {
+    pub(super) fn new(queue: Arc<ZeCommandQueue>, config: Option<&PoolConfig>) -> Self {
+        let (ze_event_tx, ze_event_rx) = mpsc::unbounded_channel::<(
+            Arc<level_zero::EventPool>,
+            level_zero::Event,
+            oneshot::Sender<()>,
+        )>();
+
+        let cancel_token = CancellationToken::new();
+        let ze_event_worker = Self::setup_ze_event_worker(ze_event_rx, cancel_token.clone());
+
+        let ze_mem_pool = if let Some(cfg) = config {
+            if cfg.enable_pool {
+                tracing::debug!("Creating placeholder ZE memory pool");
+                Some(Arc::new(ZeMemPool))
+            } else {
+                tracing::debug!("ZE memory pool disabled by configuration");
+                None
+            }
+        } else {
+            tracing::debug!("No pool configuration provided - ZE memory pool disabled");
+            None
+        };
+
+        Self {
+            queue,
+            ze_mem_pool,
+            ze_event_tx,
+            ze_event_worker: Some(ze_event_worker),
+            cancel_token,
+        }
+    }
+
+    fn setup_ze_event_worker(
+        mut ze_event_rx: mpsc::UnboundedReceiver<(
+            Arc<level_zero::EventPool>,
+            level_zero::Event,
+            oneshot::Sender<()>,
+        )>,
+        cancel_token: CancellationToken,
+    ) -> JoinHandle<()> {
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to build Tokio runtime for ZE event worker.");
+
+            runtime.block_on(async move {
+                loop {
+                    tokio::select! {
+                        Some((event_pool, event, tx)) = ze_event_rx.recv() => {
+                            tracing::debug!("ZE event worker received signal; synchronizing event");
+                            if let Err(e) = event.host_synchronize(u64::MAX) {
+                                tracing::error!("Error synchronizing ZE event: {:?}", e);
+                            }
+                            let _keep_pool_alive = event_pool;
+                            let _ = tx.send(());
+                        }
+                        _ = cancel_token.cancelled() => {
+                            break;
+                        }
+                    }
+                }
+            });
+        })
+    }
+}
+
+impl TransferBackend for TransferBackendZe {
+    fn device_mem_pool(&self) -> Option<DeviceMemPool> {
+        self.ze_mem_pool.as_ref().map(|pool| DeviceMemPool::Ze(pool.clone()))
+    }
+
+    fn device_event(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError> {
+        let event_pool = self.queue.event_pool().clone();
+
+        let event = event_pool
+            .create_event(0, ZE_EVENT_SCOPE_FLAG_HOST, ZE_EVENT_SCOPE_FLAG_HOST)
+            .map_err(|e| TransferError::ExecutionError(format!("{:?}", e)))?;
+        let mut list = self.queue.create_command_list()
+            .map_err(|e| TransferError::ExecutionError(format!("{:?}", e)))?;
+
+        list.append_signal_event(&event)
+            .map_err(|e| TransferError::ExecutionError(format!("{:?}", e)))?;
+        list.close()
+            .map_err(|e| TransferError::ExecutionError(format!("{:?}", e)))?;
+        self.queue
+            .execute_nonblocking(&mut list)
+            .map_err(|e| TransferError::ExecutionError(format!("{:?}", e)))?;
+
+        self.ze_event_tx
+            .send((event_pool, event, tx))
+            .map_err(|_| TransferError::ExecutionError("ZE event worker exited.".into()))
+    }
+
+    fn acquire_resources_for_transfer_sync(
+        &self,
+        _size: usize,
+    ) -> Result<SyncPoolItem<PinnedBuffer>, TransferError> {
+        Err(TransferError::ExecutionError(
+            "Pinned transfer resources are not supported on ZE backend".to_string(),
+        ))
+    }
+
+    fn shutdown(&mut self) {
+        self.cancel_token.cancel();
+        if let Some(handle) = self.ze_event_worker.take()
+            && let Err(e) = handle.join()
+        {
+            tracing::error!("Error joining ZE event worker: {:?}", e);
+        }
+    }
 }

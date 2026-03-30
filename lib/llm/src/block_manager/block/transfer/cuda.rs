@@ -4,16 +4,22 @@
 use super::*;
 
 use super::TransferError;
+use super::context::{DeviceMemPool, PinnedBuffer, PoolConfig, SyncPinnedBufferPool, TransferBackend};
 use crate::block_manager::block::{BlockDataProvider, BlockDataProviderMut};
 
 use anyhow::Result;
-use cudarc::driver::CudaStream;
+use cudarc::driver::{CudaEvent, CudaStream};
 use cudarc::driver::result as cuda_result;
 use cudarc::driver::sys::{CUevent_flags, CUresult, cuMemcpyHtoDAsync_v2};
+use dynamo_memory::pool::CudaMemPool;
 use dynamo_runtime::config::environment_names::cuda as env_cuda;
+use dynamo_runtime::utils::pool::SyncPoolItem;
 use std::ops::Range;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::OnceLock;
+use std::thread::JoinHandle;
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 // Global storage for kernel function - store as usize to avoid Send/Sync issues
 static COPY_KERNEL_MODULE: Mutex<Option<usize>> = Mutex::new(None);
@@ -653,6 +659,176 @@ fn load_runtime_fatbin() -> Result<cudarc::driver::sys::CUmodule, cudarc::driver
     Err(cudarc::driver::DriverError(
         cudarc::driver::sys::cudaError_enum::CUDA_ERROR_FILE_NOT_FOUND,
     ))
+}
+
+// ============================================================================
+// TransferBackendCuda
+// ============================================================================
+
+pub(super) struct TransferBackendCuda {
+    stream: Arc<CudaStream>,
+    cuda_mem_pool: Option<Arc<CudaMemPool>>,
+    pinned_buffer_pool: Option<SyncPinnedBufferPool>,
+    cuda_event_tx: mpsc::UnboundedSender<(CudaEvent, oneshot::Sender<()>)>,
+    cuda_event_worker: Option<JoinHandle<()>>,
+    cancel_token: CancellationToken,
+}
+
+impl TransferBackendCuda {
+    pub(super) fn new(stream: Arc<CudaStream>, config: Option<&PoolConfig>) -> Result<Self, anyhow::Error> {
+        let (cuda_event_tx, cuda_event_rx) =
+            mpsc::unbounded_channel::<(CudaEvent, oneshot::Sender<()>)>();
+
+        let cancel_token = CancellationToken::new();
+
+        let cancel_token_clone = cancel_token.clone();
+        let cuda_event_worker = Self::setup_cuda_event_worker(cuda_event_rx, cancel_token_clone);
+
+        let pool = {
+            tracing::debug!(
+                "Pinned buffer pool is no longer used for kernel transfers and will be removed in the future"
+            );
+            None
+        };
+
+        // Create CUDA memory pool for stream-ordered allocation
+        let cuda_mem_pool = if let Some(ref cfg) = config {
+            if cfg.enable_pool {
+                // Calculate total reserve size for pre-warming
+                let num_buffers = cfg.max_concurrent_transfers * 2 + 2;
+                let buffer_size = cfg.max_transfer_batch_size
+                    * cfg.num_outer_components
+                    * cfg.num_layers
+                    * std::mem::size_of::<u64>();
+                let reserve_size = num_buffers * buffer_size;
+
+                tracing::info!(
+                    "Creating CUDA memory pool: {} buffers × {}KB = {}MB total",
+                    num_buffers,
+                    buffer_size / 1024,
+                    reserve_size / (1024 * 1024)
+                );
+
+                let pool = CudaMemPool::builder(stream.context().clone(), reserve_size)
+                    .release_threshold(128 * 1024 * 1024) // Release memory above 128MB back to OS
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("Failed to create CUDA memory pool: {}", e))?;
+
+                tracing::info!(
+                    "CUDA memory pool created successfully (DEVICE memory, stream-ordered allocation, pre-warmed with {}MB)",
+                    reserve_size / (1024 * 1024)
+                );
+                Some(Arc::new(pool))
+            } else {
+                tracing::debug!("CUDA memory pool disabled by configuration");
+                None
+            }
+        } else {
+            tracing::debug!("No pool configuration provided - CUDA memory pool disabled");
+            None
+        };
+
+        Ok(Self {
+            stream,
+            cuda_mem_pool,
+            pinned_buffer_pool: pool,
+            cuda_event_tx,
+            cuda_event_worker: Some(cuda_event_worker),
+            cancel_token,
+        })
+    }
+
+    fn setup_cuda_event_worker(
+        mut cuda_event_rx: mpsc::UnboundedReceiver<(CudaEvent, oneshot::Sender<()>)>,
+        cancel_token: CancellationToken,
+    ) -> JoinHandle<()> {
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to build Tokio runtime for CUDA event worker.");
+
+            runtime.block_on(async move {
+                loop {
+                    tokio::select! {
+                        Some((event, tx)) = cuda_event_rx.recv() => {
+                            if let Err(e) = event.synchronize() {
+                                tracing::error!("Error synchronizing CUDA event: {}", e);
+                            }
+                            let _ = tx.send(());
+                        }
+                        _ = cancel_token.cancelled() => {
+                            break;
+                        }
+                    }
+                }
+            });
+        })
+    }
+}
+
+impl TransferBackend for TransferBackendCuda {
+    fn device_mem_pool(&self) -> Option<DeviceMemPool> {
+        self.cuda_mem_pool.as_ref().map(|pool| DeviceMemPool::Cuda(pool.clone()))
+    }
+
+    fn device_event(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError> {
+        let event = self
+            .stream
+            .record_event(Some(CUevent_flags::CU_EVENT_BLOCKING_SYNC))
+            .map_err(|e| TransferError::ExecutionError(e.to_string()))?;
+
+        self.cuda_event_tx
+            .send((event, tx))
+            .map_err(|_| TransferError::ExecutionError("CUDA event worker exited.".into()))?;
+        Ok(())
+    }
+
+    fn acquire_resources_for_transfer_sync(
+        &self,
+        size: usize,
+    ) -> Result<SyncPoolItem<PinnedBuffer>, TransferError> {
+        let ptr_array_size = size * std::mem::size_of::<u64>();
+
+        tracing::debug!(
+            "Acquiring pinned buffer: need {} bytes for {} addresses",
+            ptr_array_size,
+            size
+        );
+
+        if let Some(pool) = &self.pinned_buffer_pool {
+            tracing::debug!("Pool available - acquiring buffer (blocking)...");
+
+            let buffer = pool.acquire_blocking();
+
+            if buffer.size < ptr_array_size {
+                return Err(TransferError::ExecutionError(format!(
+                    "Buffer too small: need {}KB but buffer is only {}KB (addresses: {})",
+                    ptr_array_size / 1024,
+                    buffer.size / 1024,
+                    size
+                )));
+            }
+
+            Ok(buffer)
+        } else {
+            tracing::warn!(
+                "No pinned buffer pool configured - this should not happen in production"
+            );
+            Err(TransferError::ExecutionError(
+                "No sync pool configured - TransferContext must be created with a pool".into(),
+            ))
+        }
+    }
+
+    fn shutdown(&mut self) {
+        self.cancel_token.cancel();
+        if let Some(handle) = self.cuda_event_worker.take()
+            && let Err(e) = handle.join()
+        {
+            tracing::error!("Error joining CUDA event worker: {:?}", e);
+        }
+    }
 }
 
 #[cfg(all(test, feature = "testing-cuda"))]
