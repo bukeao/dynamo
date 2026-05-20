@@ -130,6 +130,7 @@ pub struct ZeCommandQueue {
     context: Arc<Context>,
     device: Device,
     event_pool: Arc<EventPool>,
+    immediate_copy_list: level_zero::ImmediateCommandList,
 }
 
 // SAFETY:
@@ -147,11 +148,15 @@ impl ZeCommandQueue {
         let event_pool = context
             .create_event_pool(&[device.clone()], 1, 0)
             .map_err(ZeError::from)?;
+        let immediate_copy_list = context
+            .create_copy_immediate_command_list(&device)
+            .map_err(ZeError::from)?;
         Ok(Arc::new(Self {
             handle,
             context,
             device,
             event_pool: Arc::new(event_pool),
+            immediate_copy_list,
         }))
     }
 
@@ -180,6 +185,11 @@ impl ZeCommandQueue {
     /// Get the event pool.
     pub fn event_pool(&self) -> &Arc<EventPool> {
         &self.event_pool
+    }
+
+    /// Get the persistent immediate command list on the copy engine.
+    pub fn immediate_list(&self) -> &level_zero::ImmediateCommandList {
+        &self.immediate_copy_list
     }
 }
 

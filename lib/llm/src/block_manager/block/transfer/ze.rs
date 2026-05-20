@@ -5,8 +5,7 @@ use super::*;
 use super::context::{DeviceMemPool, DeviceStream, PinnedBuffer, TransferBackend};
 use super::TransferError;
 
-use dynamo_memory::{ZeCommandQueue, ZeEvent, ZeEventPool};
-use dynamo_memory::ze::ZE_EVENT_SCOPE_FLAG_HOST;
+use dynamo_memory::ZeCommandQueue;
 use dynamo_runtime::utils::pool::SyncPoolItem;
 use std::ffi::c_void;
 use std::ops::Range;
@@ -25,7 +24,7 @@ pub struct ZeMemPool;
 pub(super) struct TransferBackendZe {
     queue: Arc<ZeCommandQueue>,
     ze_mem_pool: Option<Arc<ZeMemPool>>,
-    ze_event_tx: mpsc::UnboundedSender<(Arc<ZeEventPool>, ZeEvent, oneshot::Sender<()>, std::time::Instant)>,
+    ze_event_tx: mpsc::UnboundedSender<(Arc<ZeCommandQueue>, oneshot::Sender<()>, std::time::Instant)>,
     ze_event_worker: Option<JoinHandle<()>>,
     cancel_token: CancellationToken,
 }
@@ -33,7 +32,7 @@ pub(super) struct TransferBackendZe {
 impl TransferBackendZe {
     pub fn new(queue: Arc<ZeCommandQueue>, _config: Option<&super::context::PoolConfig>) -> Self {
         let (ze_event_tx, ze_event_rx) =
-            mpsc::unbounded_channel::<(Arc<ZeEventPool>, ZeEvent, oneshot::Sender<()>, std::time::Instant)>();
+            mpsc::unbounded_channel::<(Arc<ZeCommandQueue>, oneshot::Sender<()>, std::time::Instant)>();
 
         let cancel_token = CancellationToken::new();
         let ze_event_worker = Self::setup_ze_event_worker(ze_event_rx, cancel_token.clone());
@@ -48,7 +47,7 @@ impl TransferBackendZe {
     }
 
     fn setup_ze_event_worker(
-        mut ze_event_rx: mpsc::UnboundedReceiver<(Arc<ZeEventPool>, ZeEvent, oneshot::Sender<()>, std::time::Instant)>,
+        mut ze_event_rx: mpsc::UnboundedReceiver<(Arc<ZeCommandQueue>, oneshot::Sender<()>, std::time::Instant)>,
         cancel_token: CancellationToken,
     ) -> JoinHandle<()> {
         std::thread::spawn(move || {
@@ -60,9 +59,9 @@ impl TransferBackendZe {
             runtime.block_on(async move {
                 loop {
                     tokio::select! {
-                        Some((_pool, event, tx, start)) = ze_event_rx.recv() => {
-                            if let Err(e) = event.host_synchronize(u64::MAX) {
-                                tracing::error!("Error synchronizing Ze event: {:?}", e);
+                        Some((queue, tx, start)) = ze_event_rx.recv() => {
+                            if let Err(e) = queue.immediate_list().host_synchronize(u64::MAX) {
+                                tracing::error!("Error synchronizing Ze immediate list: {:?}", e);
                             }
                             let elapsed = start.elapsed();
                             tracing::info!("handle_local_transfer: copy done, elapsed={:.3}ms", elapsed.as_secs_f64() * 1000.0);
@@ -85,30 +84,8 @@ impl TransferBackend for TransferBackendZe {
 
     fn device_event(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError> {
         let start = std::time::Instant::now();
-        let event_pool = self.queue.event_pool().clone();
-        let event = event_pool
-            .create_event(0, ZE_EVENT_SCOPE_FLAG_HOST, ZE_EVENT_SCOPE_FLAG_HOST)
-            .map_err(|e| {
-                TransferError::ExecutionError(format!("Ze event creation failed: {:?}", e))
-            })?;
-
-        // Create a command list that signals the event, then execute it.
-        // Without this, the event is never signaled and host_synchronize hangs.
-        let mut list = self.queue.create_command_list().map_err(|e| {
-            TransferError::ExecutionError(format!("Ze command list creation failed: {:?}", e))
-        })?;
-        list.append_signal_event(&event).map_err(|e| {
-            TransferError::ExecutionError(format!("Ze append_signal_event failed: {:?}", e))
-        })?;
-        list.close().map_err(|e| {
-            TransferError::ExecutionError(format!("Ze command list close failed: {:?}", e))
-        })?;
-        self.queue.execute_nonblocking(&mut list).map_err(|e| {
-            TransferError::ExecutionError(format!("Ze command list execute failed: {:?}", e))
-        })?;
-
         self.ze_event_tx
-            .send((event_pool, event, tx, start))
+            .send((self.queue.clone(), tx, start))
             .map_err(|_| TransferError::ExecutionError("Ze event worker exited.".into()))?;
         Ok(())
     }
@@ -207,9 +184,10 @@ where
     Ok(())
 }
 
-/// Temporary ZE implementation for API parity with CUDA custom kernel path.
+/// ZE block copy using an immediate command list on the copy engine.
 ///
-/// This currently falls back to batched ZE memcpys with a single command list.
+/// Each append_memcpy dispatches directly to hardware — no close()/execute().
+/// Non-blocking: completion is signaled separately via device_event.
 pub fn copy_blocks_with_customized_kernel<'a, Source, Destination>(
     sources: &'a [Source],
     destinations: &'a mut [Destination],
@@ -229,19 +207,14 @@ where
 
     let first_src = sources[0].block_data();
     tracing::info!(
-        "ZE copy_blocks_with_customized_kernel: sources.len()={}, num_layers={}, num_outer_dims={}, first_layer_view_size={} bytes",
+        "ZE copy_blocks_with_customized_kernel (immediate): sources.len()={}, num_layers={}, num_outer_dims={}, first_layer_view_size={} bytes",
         sources.len(),
         first_src.num_layers(),
         first_src.num_outer_dims(),
         first_src.layer_view(0, 0).map(|v| v.size()).unwrap_or(0)
     );
 
-    let mut list = queue.create_command_list().map_err(|e| {
-        TransferError::ExecutionError(format!(
-            "ZE custom batch command list creation failed: {:?}",
-            e
-        ))
-    })?;
+    let immediate = queue.immediate_list();
 
     for (src, dst) in sources.iter().zip(destinations.iter_mut()) {
         let src_data = src.block_data();
@@ -259,19 +232,19 @@ where
 
             unsafe {
                 tracing::debug!(
-                    "ZE copy_blocks_with_customized_kernel contiguous: src=0x{:x}, dst=0x{:x}, size={}",
+                    "ZE immediate memcpy contiguous: src=0x{:x}, dst=0x{:x}, size={}",
                     src_view.as_ptr() as usize,
                     dst_view.as_mut_ptr() as usize,
                     src_view.size()
                 );
-                list.append_memcpy(
+                immediate.append_memcpy(
                     dst_view.as_mut_ptr() as *mut c_void,
                     src_view.as_ptr() as *const c_void,
                     src_view.size(),
                 )
                 .map_err(|e| {
                     TransferError::ExecutionError(format!(
-                        "ZE custom batch append_memcpy (contiguous) failed: {:?}",
+                        "ZE immediate append_memcpy (contiguous) failed: {:?}",
                         e
                     ))
                 })?;
@@ -293,21 +266,21 @@ where
 
                     unsafe {
                         tracing::debug!(
-                            "ZE copy_blocks_with_customized_kernel layered: layer={}, outer={}, src=0x{:x}, dst=0x{:x}, size={}",
+                            "ZE immediate memcpy layered: layer={}, outer={}, src=0x{:x}, dst=0x{:x}, size={}",
                             layer_idx,
                             outer_idx,
                             src_view.as_ptr() as usize,
                             dst_view.as_mut_ptr() as usize,
                             src_view.size()
                         );
-                        list.append_memcpy(
+                        immediate.append_memcpy(
                             dst_view.as_mut_ptr() as *mut c_void,
                             src_view.as_ptr() as *const c_void,
                             src_view.size(),
                         )
                         .map_err(|e| {
                             TransferError::ExecutionError(format!(
-                                "ZE custom batch append_memcpy (layered) failed: {:?}",
+                                "ZE immediate append_memcpy (layered) failed: {:?}",
                                 e
                             ))
                         })?;
@@ -330,19 +303,12 @@ where
         memcpy_ops * first.layer_view(0, 0).map(|v| v.size()).unwrap_or(0)
     };
     tracing::info!(
-        "ZE copy_blocks_with_customized_kernel: num_blocks={}, memcpy_ops={}, total_bytes={} ({:.2} MB)",
+        "ZE copy_blocks_with_customized_kernel (immediate): num_blocks={}, memcpy_ops={}, total_bytes={} ({:.2} MB)",
         num_blocks,
         memcpy_ops,
         total_bytes,
         total_bytes as f64 / (1024.0 * 1024.0)
     );
-
-    list.close().map_err(|e| {
-        TransferError::ExecutionError(format!("ZE custom batch list close failed: {:?}", e))
-    })?;
-    queue.execute_nonblocking(&mut list).map_err(|e| {
-        TransferError::ExecutionError(format!("ZE custom batch queue submit failed: {:?}", e))
-    })?;
 
     Ok(())
 }
