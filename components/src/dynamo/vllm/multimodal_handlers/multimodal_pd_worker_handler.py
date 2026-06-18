@@ -7,7 +7,7 @@ import uuid
 from typing import Any, Optional
 
 import torch
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo.common.memory.multimodal_embedding_cache_manager import (

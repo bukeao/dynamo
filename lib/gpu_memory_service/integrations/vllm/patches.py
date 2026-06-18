@@ -119,7 +119,7 @@ def patch_register_kv_caches() -> None:
         return
 
     try:
-        from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
             NixlConnector,
         )
     except ImportError:

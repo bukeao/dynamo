@@ -4,7 +4,7 @@
 import logging
 from typing import AsyncIterator
 
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs import TokensPrompt
 
 import dynamo.nixl_connect as connect
 from dynamo.common.utils import nvtx_utils as _nvtx
