@@ -44,7 +44,7 @@ pub trait Worker: Send + Sync {
 
     fn clear_connector_metadata(&mut self);
 
-    fn save_kv_layer(&mut self, layer_name: String) -> anyhow::Result<()>;
+    fn save_kv_layer(&mut self, layer_name: String, event_handle: u64) -> anyhow::Result<()>;
 
     fn get_finished(
         &mut self,
@@ -314,7 +314,7 @@ impl Worker for KvConnectorWorker {
 
     /// Trigger layer-wise completion signals.
     /// Trigger block-wise completion signals afer last layer.
-    fn save_kv_layer(&mut self, _layer_name: String) -> anyhow::Result<()> {
+    fn save_kv_layer(&mut self, _layer_name: String, event_handle: u64) -> anyhow::Result<()> {
         self.layers_complete += 1;
         tracing::debug!(
             iteration = self.iteration,
@@ -336,7 +336,7 @@ impl Worker for KvConnectorWorker {
             // block on the the completion of the last layer
             // todo(ryan): capture the context, pass this to the scheduler to do the await on another thread
             // or put the event on a stream and use stream waits to keep it all on device.
-            event_sync_blocking_for_device(self.layer_events[self.layers_complete - 1], &self.device_type);
+            event_sync_blocking_for_device(event_handle, &self.device_type);
             for operation in &offloading_operations {
                 tracing::debug!(
                     request_id = %operation.request_id,
@@ -540,10 +540,10 @@ impl PyKvConnectorWorker {
         self.connector_worker.clear_connector_metadata()
     }
 
-    pub fn save_kv_layer(&mut self, layer_name: String, _kv_layer: Py<PyAny>) -> PyResult<()> {
+    pub fn save_kv_layer(&mut self, layer_name: String, _kv_layer: Py<PyAny>, event_handle: u64) -> PyResult<()> {
         // Note: kv_layer is not used in the current implementation
         self.connector_worker
-            .save_kv_layer(layer_name)
+            .save_kv_layer(layer_name, event_handle)
             .map_err(to_pyerr)
     }
 

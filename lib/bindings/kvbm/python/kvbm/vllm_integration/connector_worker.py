@@ -193,11 +193,13 @@ class KvConnectorWorker:
         """
         if self.device_type == "cuda":
             self.events[layer_name].record(torch.cuda.current_stream(self.device_id))
+            event_handle = self.events[layer_name].cuda_event
         elif self.device_type == "xpu":
             self.events[layer_name].record(torch.xpu.current_stream(self.device_id))
+            event_handle = self.events[layer_name].sycl_event
         else:
             raise NotImplementedError(f"Unsupported KV cache device type: {self.device_type}")
-        self._connector.save_kv_layer(layer_name, kv_layer)
+        self._connector.save_kv_layer(layer_name, kv_layer, event_handle)
 
     def get_finished(
         self, finished_req_ids: set[str]
