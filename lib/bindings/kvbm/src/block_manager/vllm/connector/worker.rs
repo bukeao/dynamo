@@ -333,10 +333,17 @@ impl Worker for KvConnectorWorker {
                 offloading_operations.len()
             );
 
-            // block on the the completion of the last layer
-            // todo(ryan): capture the context, pass this to the scheduler to do the await on another thread
-            // or put the event on a stream and use stream waits to keep it all on device.
-            event_sync_blocking_for_device(event_handle, &self.device_type);
+            if self.device_type == "xpu" || self.device_type == "ze" {
+                let native_ze_event = unsafe { dynamo_memory::ze::get_native_ze_event(event_handle) };
+                tracing::info!(
+                    iteration = self.iteration,
+                    native_ze_event = format_args!("0x{:x}", native_ze_event),
+                    "setting pending compute event for device-side sync on D2H queue"
+                );
+                dynamo_llm::block_manager::block::transfer::set_pending_compute_event(native_ze_event);
+            } else {
+                event_sync_blocking_for_device(event_handle, &self.device_type);
+            }
             for operation in &offloading_operations {
                 tracing::debug!(
                     request_id = %operation.request_id,

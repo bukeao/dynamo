@@ -222,14 +222,25 @@ pub(super) trait TransferBackend: Send + Sync {
     /// Record a device event and notify `tx` when it completes.
     fn device_event(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError>;
 
+    /// Record a device event on the D2H queue. Falls back to `device_event` if
+    /// the backend doesn't separate directions.
+    fn device_event_d2h(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError> {
+        self.device_event(tx)
+    }
+
     /// Acquire a pinned buffer from the legacy pool.
     fn acquire_resources_for_transfer_sync(
         &self,
         size: usize,
     ) -> Result<SyncPoolItem<PinnedBuffer>, TransferError>;
 
-    /// Get the device stream.
+    /// Get the device stream (H2D by default).
     fn device_stream(&self) -> DeviceStream;
+
+    /// Get a separate D2H stream if the backend supports split queues.
+    fn device_stream_d2h(&self) -> Option<DeviceStream> {
+        None
+    }
 
     /// Shut down the backend (cancel workers, join threads).
     fn shutdown(&mut self);
@@ -287,6 +298,15 @@ impl TransferContext {
 
     pub fn device_event(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError> {
         self.backend.device_event(tx)
+    }
+
+    pub fn device_event_d2h(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError> {
+        self.backend.device_event_d2h(tx)
+    }
+
+    /// Get the D2H stream if separate from H2D, otherwise falls back to the main stream.
+    pub fn stream_d2h(&self) -> DeviceStream {
+        self.backend.device_stream_d2h().unwrap_or_else(|| self.backend.device_stream())
     }
 
     pub fn acquire_resources_for_transfer_sync(

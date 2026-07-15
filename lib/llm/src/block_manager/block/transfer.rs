@@ -23,6 +23,7 @@ use tokio::sync::oneshot;
 pub use crate::block_manager::storage::{CudaAccessible, Local, Remote};
 pub use async_trait::async_trait;
 pub use context::{DeviceContextExt, DeviceStream, PoolConfig, TransferContext};
+pub use ze::set_pending_compute_event;
 
 fn copy_block<Source, Destination>(
     source: &Source,
@@ -255,13 +256,28 @@ where
                 RB::write_to_strategy(),
                 sources.len()
             );
-            tracing::debug!(
-                "Transfer: Using strategy: {:?}",
-                RB::write_to_strategy()
-            );
+
+            let is_d2h = RB::write_to_strategy() == TransferStrategy::AsyncD2H;
+            let stream = if is_d2h { ctx.stream_d2h() } else { ctx.stream() };
+
+            if is_d2h {
+                let pending_event = ze::take_pending_compute_event();
+                if pending_event != 0 {
+                    if let DeviceStream::Ze(ref ze_queue) = stream {
+                        tracing::info!(
+                            "handle_local_transfer D2H: issuing device-side wait on compute event 0x{:x}",
+                            pending_event
+                        );
+                        ze_queue.immediate_list().append_wait_on_raw_ze_event(pending_event)
+                            .map_err(|e| TransferError::ExecutionError(
+                                format!("ZE append_wait_on_raw_ze_event failed: {:?}", e)
+                            ))?;
+                    }
+                }
+            }
 
             if RB::write_to_strategy() == TransferStrategy::AsyncH2D
-                || RB::write_to_strategy() == TransferStrategy::AsyncD2H
+                || is_d2h
             {
                 let is_contiguous = sources[0].block_data().is_fully_contiguous()
                     && targets[0].block_data().is_fully_contiguous();
@@ -273,7 +289,7 @@ where
                         copy_blocks_with_customized_kernel(
                             sources,
                             targets,
-                            ctx.stream(),
+                            stream,
                             &ctx,
                         )?;
                     }
@@ -282,17 +298,22 @@ where
                             copy_block(
                                 src,
                                 dst,
-                                ctx.stream(),
+                                stream.clone(),
                                 RB::write_to_strategy(),
                             )?;
                         }
                     }
                 };
-                ctx.device_event(tx)?;
+
+                if is_d2h {
+                    ctx.device_event_d2h(tx)?;
+                } else {
+                    ctx.device_event(tx)?;
+                }
 
                 Ok(rx)
             } else {
-                // Fall back to individual copy for D2Dblocks
+                // Fall back to individual copy for D2D blocks
                 for (src, dst) in sources.iter().zip(targets.iter_mut()) {
                     copy_block(src, dst, ctx.stream(), RB::write_to_strategy())?;
                 }

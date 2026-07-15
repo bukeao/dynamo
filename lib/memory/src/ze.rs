@@ -11,7 +11,7 @@
 
 use crate::{StorageError, pinned::StorageBackendOps};
 
-pub use level_zero::{Event as ZeEvent, EventPool as ZeEventPool, ZE_EVENT_SCOPE_FLAG_HOST, sync_sycl_event};
+pub use level_zero::{Event as ZeEvent, EventPool as ZeEventPool, ZE_EVENT_SCOPE_FLAG_HOST, sync_sycl_event, get_native_ze_event};
 use level_zero::{self, CommandList, CommandQueue, Context, Device, Driver, EventPool};
 use std::{
     collections::HashMap,
@@ -190,6 +190,12 @@ impl ZeCommandQueue {
     /// Get the persistent immediate command list on the copy engine.
     pub fn immediate_list(&self) -> &level_zero::ImmediateCommandList {
         &self.immediate_copy_list
+    }
+
+    /// Create a sibling queue sharing the same context and device but with its
+    /// own independent immediate command list.
+    pub fn new_sibling(&self) -> Result<Arc<Self>, ZeError> {
+        Self::new(self.context.clone(), self.device.clone())
     }
 }
 

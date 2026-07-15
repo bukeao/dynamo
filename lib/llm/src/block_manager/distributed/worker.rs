@@ -157,16 +157,42 @@ async fn perform_allocation_and_build_handler(
         let host_ctx = backend.create(device_id)?;
         let host_allocator = Arc::new(PinnedAllocator::new_with_context(host_ctx));
 
-        let host_layout = layout_builder
+        // On Ze/XPU, force LayerSeparate for host to avoid a single massive
+        // zeMemAllocHost that exceeds driver limits. This splits the allocation
+        // into one chunk per layer, each small enough to succeed.
+        let host_layout_type = match backend {
+            DeviceBackend::Ze if matches!(worker_config.host_layout_type, LayoutType::FullyContiguous) => {
+                tracing::info!(
+                    "XPU: overriding host layout from FullyContiguous to LayerSeparate \
+                     to avoid single large USM host allocation"
+                );
+                LayoutType::LayerSeparate { outer_contiguous: false }
+            }
+            _ => worker_config.host_layout_type,
+        };
+
+        match layout_builder
             .num_blocks(leader_meta.num_host_blocks)
             .build()?
-            .allocate_layout(worker_config.host_layout_type, host_allocator)?;
-        Some(KvbmWorker::make_layout::<_, BasicMetadata>(
-            host_layout,
-            transfer_context.nixl_agent().as_ref(),
-            1,
-            worker_id,
-        )?)
+            .allocate_layout(host_layout_type, host_allocator)
+        {
+            Ok(host_layout) => Some(KvbmWorker::make_layout::<_, BasicMetadata>(
+                host_layout,
+                transfer_context.nixl_agent().as_ref(),
+                1,
+                worker_id,
+            )?),
+            Err(e) => {
+                tracing::error!(
+                    "Host cache allocation failed (num_blocks={}, layout={:?}): {}. \
+                     Continuing without host cache — reduce DYN_KVBM_CPU_CACHE_GB.",
+                    leader_meta.num_host_blocks,
+                    host_layout_type,
+                    e
+                );
+                None
+            }
+        }
     } else {
         None
     };

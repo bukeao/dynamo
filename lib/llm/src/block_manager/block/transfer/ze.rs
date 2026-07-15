@@ -10,9 +10,20 @@ use dynamo_runtime::utils::pool::SyncPoolItem;
 use std::ffi::c_void;
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+
+static PENDING_COMPUTE_ZE_EVENT: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_pending_compute_event(raw_ze_event: u64) {
+    PENDING_COMPUTE_ZE_EVENT.store(raw_ze_event, Ordering::Release);
+}
+
+pub fn take_pending_compute_event() -> u64 {
+    PENDING_COMPUTE_ZE_EVENT.swap(0, Ordering::Acquire)
+}
 
 // ============================================================================
 // Ze transfer backend
@@ -22,8 +33,8 @@ use tokio_util::sync::CancellationToken;
 pub struct ZeMemPool;
 
 pub(super) struct TransferBackendZe {
-    queue: Arc<ZeCommandQueue>,
-    ze_mem_pool: Option<Arc<ZeMemPool>>,
+    queue_h2d: Arc<ZeCommandQueue>,
+    queue_d2h: Arc<ZeCommandQueue>,
     ze_event_tx: mpsc::UnboundedSender<(Arc<ZeCommandQueue>, oneshot::Sender<()>, std::time::Instant)>,
     ze_event_worker: Option<JoinHandle<()>>,
     cancel_token: CancellationToken,
@@ -31,15 +42,24 @@ pub(super) struct TransferBackendZe {
 
 impl TransferBackendZe {
     pub fn new(queue: Arc<ZeCommandQueue>, _config: Option<&super::context::PoolConfig>) -> Self {
+        let queue_d2h = queue.new_sibling().unwrap_or_else(|e| {
+            tracing::error!("Failed to create D2H sibling queue: {:?}, falling back to shared", e);
+            queue.clone()
+        });
+
         let (ze_event_tx, ze_event_rx) =
             mpsc::unbounded_channel::<(Arc<ZeCommandQueue>, oneshot::Sender<()>, std::time::Instant)>();
 
         let cancel_token = CancellationToken::new();
         let ze_event_worker = Self::setup_ze_event_worker(ze_event_rx, cancel_token.clone());
 
+        tracing::info!(
+            "TransferBackendZe: created separate H2D and D2H immediate command lists"
+        );
+
         Self {
-            queue,
-            ze_mem_pool: None,
+            queue_h2d: queue,
+            queue_d2h,
             ze_event_tx,
             ze_event_worker: Some(ze_event_worker),
             cancel_token,
@@ -85,7 +105,15 @@ impl TransferBackend for TransferBackendZe {
     fn device_event(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError> {
         let start = std::time::Instant::now();
         self.ze_event_tx
-            .send((self.queue.clone(), tx, start))
+            .send((self.queue_h2d.clone(), tx, start))
+            .map_err(|_| TransferError::ExecutionError("Ze event worker exited.".into()))?;
+        Ok(())
+    }
+
+    fn device_event_d2h(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError> {
+        let start = std::time::Instant::now();
+        self.ze_event_tx
+            .send((self.queue_d2h.clone(), tx, start))
             .map_err(|_| TransferError::ExecutionError("Ze event worker exited.".into()))?;
         Ok(())
     }
@@ -100,7 +128,11 @@ impl TransferBackend for TransferBackendZe {
     }
 
     fn device_stream(&self) -> DeviceStream {
-        DeviceStream::Ze(self.queue.clone())
+        DeviceStream::Ze(self.queue_h2d.clone())
+    }
+
+    fn device_stream_d2h(&self) -> Option<DeviceStream> {
+        Some(DeviceStream::Ze(self.queue_d2h.clone()))
     }
 
     fn shutdown(&mut self) {
